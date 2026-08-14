@@ -1,0 +1,187 @@
+from uuid import UUID
+
+from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.core.errors import AppError
+from app.models import Cut, CutImage, CutVideo, GenerationJob, GenerationKind, JobStatus
+from app.schemas import CreateGenerationRequest, MockScenario, normalize_mock_scenario
+
+
+async def create_image_job(
+    session: AsyncSession,
+    cut_id: UUID,
+    request: CreateGenerationRequest,
+    *,
+    max_attempts: int = 3,
+) -> GenerationJob:
+    return await _create_job(
+        session,
+        cut_id,
+        kind=GenerationKind.IMAGE,
+        request=request,
+        max_attempts=max_attempts,
+    )
+
+
+async def create_video_job(
+    session: AsyncSession,
+    cut_id: UUID,
+    request: CreateGenerationRequest,
+    *,
+    max_attempts: int = 3,
+) -> GenerationJob:
+    return await _create_job(
+        session,
+        cut_id,
+        kind=GenerationKind.VIDEO,
+        request=request,
+        max_attempts=max_attempts,
+    )
+
+
+async def select_image(session: AsyncSession, cut_id: UUID, image_id: UUID) -> Cut:
+    async with session.begin():
+        cut = await _cut_or_error(session, cut_id)
+        image = await session.scalar(
+            select(CutImage)
+            .join(GenerationJob, CutImage.generation_job_id == GenerationJob.id)
+            .where(
+                CutImage.id == image_id,
+                CutImage.cut_id == cut.id,
+                GenerationJob.cut_id == cut.id,
+                GenerationJob.kind == GenerationKind.IMAGE,
+                GenerationJob.status == JobStatus.SUCCEEDED,
+            )
+        )
+        if image is None:
+            raise AppError(status_code=404, code="IMAGE_NOT_FOUND", message="Image not found")
+        cut.selected_image_id = image.id
+        cut.selected_video_id = None
+    return cut
+
+
+async def select_video(session: AsyncSession, cut_id: UUID, video_id: UUID) -> Cut:
+    async with session.begin():
+        cut = await _cut_or_error(session, cut_id)
+        video = await session.scalar(
+            select(CutVideo)
+            .join(GenerationJob, CutVideo.generation_job_id == GenerationJob.id)
+            .where(
+                CutVideo.id == video_id,
+                CutVideo.cut_id == cut.id,
+                GenerationJob.cut_id == cut.id,
+                GenerationJob.kind == GenerationKind.VIDEO,
+                GenerationJob.status == JobStatus.SUCCEEDED,
+                GenerationJob.source_image_id == CutVideo.cut_image_id,
+            )
+        )
+        if video is None:
+            raise AppError(status_code=404, code="VIDEO_NOT_FOUND", message="Video not found")
+        if video.cut_image_id != cut.selected_image_id:
+            raise AppError(
+                status_code=409,
+                code="VIDEO_SOURCE_MISMATCH",
+                message="Video must use the selected image",
+            )
+        cut.selected_video_id = video.id
+    return cut
+
+
+async def _create_job(
+    session: AsyncSession,
+    cut_id: UUID,
+    *,
+    kind: GenerationKind,
+    request: CreateGenerationRequest,
+    max_attempts: int,
+) -> GenerationJob:
+    try:
+        async with session.begin():
+            cut = await _cut_or_error(session, cut_id)
+            source_image_id: UUID | None = None
+            prompt = cut.image_prompt
+            if kind is GenerationKind.VIDEO:
+                source_image = await _selected_successful_image(session, cut)
+                source_image_id = source_image.id
+                prompt = cut.video_prompt
+            version = await session.scalar(
+                select(func.coalesce(func.max(GenerationJob.version), 0) + 1).where(
+                    GenerationJob.cut_id == cut.id,
+                    GenerationJob.kind == kind,
+                )
+            )
+            job = GenerationJob(
+                cut_id=cut.id,
+                kind=kind,
+                version=version,
+                status=JobStatus.QUEUED,
+                prompt=prompt,
+                source_image_id=source_image_id,
+                attempt_count=0,
+                max_attempts=max_attempts,
+                mock_scenario=_normalized_mock_scenario(request.mock_scenario),
+            )
+            session.add(job)
+            await session.flush()
+    except IntegrityError as error:
+        if _is_active_generation_conflict(error):
+            raise AppError(
+                status_code=409,
+                code="GENERATION_ALREADY_ACTIVE",
+                message="A generation job is already active",
+            ) from error
+        raise
+    return job
+
+
+def _normalized_mock_scenario(raw_scenario: str | None) -> MockScenario | None:
+    try:
+        return normalize_mock_scenario(raw_scenario)
+    except ValueError as error:
+        raise AppError(
+            status_code=422,
+            code="REQUEST_VALIDATION_FAILED",
+            message="Request validation failed",
+        ) from error
+
+
+def _is_active_generation_conflict(error: IntegrityError) -> bool:
+    return "UNIQUE constraint failed: generation_jobs.cut_id, generation_jobs.kind" in str(
+        error.orig
+    )
+
+
+async def _cut_or_error(session: AsyncSession, cut_id: UUID) -> Cut:
+    cut = await session.get(Cut, cut_id)
+    if cut is None:
+        raise AppError(status_code=404, code="CUT_NOT_FOUND", message="Cut not found")
+    return cut
+
+
+async def _selected_successful_image(session: AsyncSession, cut: Cut) -> CutImage:
+    if cut.selected_image_id is None:
+        raise AppError(
+            status_code=409,
+            code="SELECTED_IMAGE_REQUIRED",
+            message="A successful selected image is required",
+        )
+    image = await session.scalar(
+        select(CutImage)
+        .join(GenerationJob, CutImage.generation_job_id == GenerationJob.id)
+        .where(
+            CutImage.id == cut.selected_image_id,
+            CutImage.cut_id == cut.id,
+            GenerationJob.cut_id == cut.id,
+            GenerationJob.kind == GenerationKind.IMAGE,
+            GenerationJob.status == JobStatus.SUCCEEDED,
+        )
+    )
+    if image is None:
+        raise AppError(
+            status_code=409,
+            code="SELECTED_IMAGE_REQUIRED",
+            message="A successful selected image is required",
+        )
+    return image

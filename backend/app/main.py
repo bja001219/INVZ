@@ -10,12 +10,22 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.core.config import GenerationMode, Settings, get_settings
 from app.core.db import build_engine
-from app.core.errors import register_error_handlers
+from app.core.errors import AppError, register_error_handlers
 from app.core.logging import configure_secret_redaction
+from app.generations import create_image_job, create_video_job, select_image, select_video
 from app.providers.mock import MockSceneProvider
 from app.providers.openai_scene import OpenAISceneProvider
-from app.scenes import create_scene, get_scene
-from app.schemas import ConfigResponse, SceneCreateRequest, SceneResponse
+from app.scenes import _job_response, create_scene, get_scene
+from app.schemas import (
+    ConfigResponse,
+    CreateGenerationRequest,
+    GenerationJobResponse,
+    SceneCreateRequest,
+    SceneResponse,
+    SelectImageRequest,
+    SelectVideoRequest,
+    normalize_mock_scenario,
+)
 
 
 def create_app(settings: Settings) -> FastAPI:
@@ -88,6 +98,72 @@ def create_app(settings: Settings) -> FastAPI:
         session: Annotated[AsyncSession, Depends(get_app_session)],
     ) -> SceneResponse:
         return await get_scene(session, scene_id)
+
+    def validate_generation_request(payload: CreateGenerationRequest) -> None:
+        if settings.generation_mode is GenerationMode.LIVE and payload.mock_scenario is not None:
+            raise AppError(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                code="GENERATION_REQUEST_INVALID",
+                message="mockScenario is available only in Mock mode",
+            )
+        try:
+            payload.mock_scenario = normalize_mock_scenario(payload.mock_scenario)
+        except ValueError as error:
+            raise AppError(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                code="REQUEST_VALIDATION_FAILED",
+                message="Request validation failed",
+            ) from error
+
+    @application.post(
+        "/api/cuts/{cut_id}/images",
+        response_model=GenerationJobResponse,
+        status_code=status.HTTP_202_ACCEPTED,
+    )
+    async def post_image_generation(
+        cut_id: UUID,
+        payload: CreateGenerationRequest,
+        session: Annotated[AsyncSession, Depends(get_app_session)],
+    ) -> GenerationJobResponse:
+        validate_generation_request(payload)
+        job = await create_image_job(
+            session, cut_id, payload, max_attempts=settings.generation_max_attempts
+        )
+        return _job_response(job)
+
+    @application.post(
+        "/api/cuts/{cut_id}/videos",
+        response_model=GenerationJobResponse,
+        status_code=status.HTTP_202_ACCEPTED,
+    )
+    async def post_video_generation(
+        cut_id: UUID,
+        payload: CreateGenerationRequest,
+        session: Annotated[AsyncSession, Depends(get_app_session)],
+    ) -> GenerationJobResponse:
+        validate_generation_request(payload)
+        job = await create_video_job(
+            session, cut_id, payload, max_attempts=settings.generation_max_attempts
+        )
+        return _job_response(job)
+
+    @application.put("/api/cuts/{cut_id}/selected-image", response_model=SceneResponse)
+    async def put_selected_image(
+        cut_id: UUID,
+        payload: SelectImageRequest,
+        session: Annotated[AsyncSession, Depends(get_app_session)],
+    ) -> SceneResponse:
+        cut = await select_image(session, cut_id, payload.image_id)
+        return await get_scene(session, cut.scene_id)
+
+    @application.put("/api/cuts/{cut_id}/selected-video", response_model=SceneResponse)
+    async def put_selected_video(
+        cut_id: UUID,
+        payload: SelectVideoRequest,
+        session: Annotated[AsyncSession, Depends(get_app_session)],
+    ) -> SceneResponse:
+        cut = await select_video(session, cut_id, payload.video_id)
+        return await get_scene(session, cut.scene_id)
 
     return application
 

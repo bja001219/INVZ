@@ -58,6 +58,7 @@ async def test_scene_api_trims_prompt_and_returns_six_cuts(client) -> None:
     body = response.json()
     assert body["userPrompt"] == "moon voyage"
     assert len(body["cuts"]) == 6
+    assert all(cut["id"] is not None for cut in body["cuts"])
     assert {cut["durationSec"] for cut in body["cuts"]} == {5}
 
 
