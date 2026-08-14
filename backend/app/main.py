@@ -1,4 +1,5 @@
 from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Annotated
 from uuid import UUID
@@ -8,12 +9,15 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from app.core.clock import Clock
 from app.core.config import GenerationMode, Settings, get_settings
 from app.core.db import build_engine
 from app.core.errors import AppError, register_error_handlers
 from app.core.logging import configure_secret_redaction
 from app.generations import create_image_job, create_video_job, select_image, select_video
-from app.providers.mock import MockSceneProvider
+from app.providers.contracts import GenerationProvider
+from app.providers.kie import KieGenerationProvider
+from app.providers.mock import MockGenerationProvider, MockSceneProvider
 from app.providers.openai_scene import OpenAISceneProvider
 from app.scenes import _job_response, create_scene, get_scene
 from app.schemas import (
@@ -26,14 +30,45 @@ from app.schemas import (
     SelectVideoRequest,
     normalize_mock_scenario,
 )
+from app.worker import GenerationWorker
 
 
-def create_app(settings: Settings) -> FastAPI:
-    application = FastAPI(title="InvzAssign Prompt-to-Animation MVP")
-    register_error_handlers(application)
+def create_app(settings: Settings, *, generation_worker: GenerationWorker | None = None) -> FastAPI:
     engine = build_engine(settings.database_url)
     session_factory = async_sessionmaker(engine, expire_on_commit=False)
+
+    generation_provider: GenerationProvider | None = None
+    if generation_worker is None:
+        if settings.generation_mode is GenerationMode.MOCK:
+            generation_provider = MockGenerationProvider()
+        else:
+            generation_provider = KieGenerationProvider(
+                api_key=settings.kie_api_key.get_secret_value()
+            )
+        generation_worker = GenerationWorker(
+            session_factory=session_factory,
+            provider=generation_provider,
+            clock=Clock(),
+            retry_base_delay_sec=settings.retry_base_delay_sec,
+            provider_poll_interval_sec=settings.provider_poll_interval_sec,
+            generation_attempt_timeout_sec=settings.generation_attempt_timeout_sec,
+        )
+
+    @asynccontextmanager
+    async def lifespan(_application: FastAPI) -> AsyncIterator[None]:
+        await generation_worker.start()
+        try:
+            yield
+        finally:
+            await generation_worker.stop()
+            if isinstance(generation_provider, KieGenerationProvider):
+                await generation_provider.aclose()
+            await engine.dispose()
+
+    application = FastAPI(title="InvzAssign Prompt-to-Animation MVP", lifespan=lifespan)
+    register_error_handlers(application)
     application.state.engine = engine
+    application.state.generation_worker = generation_worker
 
     async def get_app_session() -> AsyncIterator[AsyncSession]:
         async with session_factory() as session:
