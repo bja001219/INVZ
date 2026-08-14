@@ -1,0 +1,1 @@
+"""InvzAssign backend application."""
