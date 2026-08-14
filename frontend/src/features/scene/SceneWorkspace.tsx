@@ -3,6 +3,7 @@ import { useQuery } from "@tanstack/react-query";
 import { api, errorMessage } from "../../api/client";
 import type { GenerationMode, Scene } from "../../api/types";
 import { CutCard } from "../generations/CutCard";
+import { SequencePlayer } from "../player/SequencePlayer";
 
 const activeStatuses = new Set(["QUEUED", "SUBMITTING", "PROCESSING", "RETRY_WAIT"]);
 
@@ -46,9 +47,11 @@ export function SceneWorkspace({ sceneId, generationMode }: SceneWorkspaceProps)
         </div>
         <dl className="scene-metrics">
           <div><dt>Cuts</dt><dd>6</dd></div>
-          <div><dt>Duration</dt><dd>30 sec</dd></div>
+          <div><dt>Nominal duration</dt><dd>30 sec</dd></div>
         </dl>
       </header>
+
+      <SequencePlayer cuts={orderedCuts} />
 
       <div className="cut-list">
         {orderedCuts.map((cut) => (
