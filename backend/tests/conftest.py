@@ -45,9 +45,13 @@ def secret_filter() -> Callable[..., SecretRedactionFilter]:
 
 @pytest_asyncio.fixture
 async def client(settings: Settings) -> AsyncIterator[httpx.AsyncClient]:
-    transport = httpx.ASGITransport(app=create_app(settings))
+    application = create_app(settings)
+    async with application.state.engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    transport = httpx.ASGITransport(app=application)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as test_client:
         yield test_client
+    await application.state.engine.dispose()
 
 
 @pytest_asyncio.fixture
