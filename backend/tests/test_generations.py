@@ -452,7 +452,10 @@ async def test_generation_route_returns_queued_job_and_uses_mock_scenario(
         "version": 1,
         "status": "QUEUED",
         "prompt": "image prompt",
+        "generationMode": "MOCK",
         "sourceImageId": None,
+        "referenceImageId": None,
+        "batchId": None,
         "attemptCount": 0,
         "maxAttempts": 3,
         "nextRunAt": None,
@@ -547,6 +550,32 @@ async def test_image_selection_endpoint_rejects_unsuccessful_artifact(
 
     assert response.status_code == 404
     assert response.json() == {"code": "IMAGE_NOT_FOUND", "message": "Image not found"}
+
+
+async def test_job_records_the_requested_generation_mode(session: AsyncSession) -> None:
+    from app.generations import create_image_job
+    from app.schemas import CreateGenerationRequest
+
+    cut = await make_cut(session)
+
+    job = await create_image_job(
+        session, cut.id, CreateGenerationRequest(), generation_mode="LIVE"
+    )
+
+    assert job.generation_mode == "LIVE"
+
+
+async def test_scene_detail_exposes_mode_and_lineage_fields(
+    client: httpx.AsyncClient, generation_cut: Cut
+) -> None:
+    await client.post(f"/api/cuts/{generation_cut.id}/images", json={})
+
+    body = (await client.get(f"/api/scenes/{generation_cut.scene_id}")).json()
+
+    job = body["cuts"][0]["imageJobs"][0]
+    assert job["generationMode"] == "MOCK"
+    assert job["referenceImageId"] is None
+    assert job["batchId"] is None
 
 
 async def test_active_generation_endpoint_returns_exact_conflict_envelope(

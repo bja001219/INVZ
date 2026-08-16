@@ -257,7 +257,7 @@ def test_metadata_foreign_keys_have_a_resolvable_creation_order() -> None:
         warnings.simplefilter("error", SAWarning)
         sorted_tables = list(Base.metadata.sorted_tables)
 
-    assert len(sorted_tables) == 5
+    assert len(sorted_tables) == 6
 
 
 # Deliberately not shaped like a real `sk-…` key, so the repository secret scan documented

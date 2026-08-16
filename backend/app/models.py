@@ -114,6 +114,7 @@ class GenerationJob(Base):
             "status IN ('QUEUED', 'SUBMITTING', 'PROCESSING', 'RETRY_WAIT', 'SUCCEEDED', 'FAILED')",
             name="ck_generation_status",
         ),
+        CheckConstraint("generation_mode IN ('MOCK', 'LIVE')", name="ck_generation_mode"),
         Index(
             "uq_active_generation_per_cut_kind",
             "cut_id",
@@ -144,6 +145,27 @@ class GenerationJob(Base):
         ),
         nullable=True,
     )
+    # Snapshot of the mode in force when the job was requested. The worker follows this value,
+    # not the current runtime mode, so a mid-flight job is never handed to the other provider.
+    generation_mode: Mapped[str] = mapped_column(String(10), default="MOCK")
+    # The scene anchor image an IMAGE job was told to stay consistent with. Distinct from
+    # source_image_id, which is the image a VIDEO job was generated from.
+    reference_image_id: Mapped[UUID | None] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey(
+            "cut_images.id",
+            name="fk_generation_jobs_reference_image_id",
+            ondelete="SET NULL",
+            use_alter=True,
+        ),
+        nullable=True,
+    )
+    batch_id: Mapped[UUID | None] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("generation_batches.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
     external_task_id: Mapped[str | None] = mapped_column(String(200), nullable=True)
     attempt_count: Mapped[int] = mapped_column(Integer, default=0)
     max_attempts: Mapped[int] = mapped_column(Integer, default=3)
@@ -163,6 +185,24 @@ class GenerationJob(Base):
         onupdate=func.current_timestamp(),
     )
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class GenerationBatch(Base):
+    """One scene-wide generation request. Batch progress is derived from its jobs, never stored,
+    so there is no denormalized status to drift out of sync with the state machine."""
+
+    __tablename__ = "generation_batches"
+    __table_args__ = (CheckConstraint("kind IN ('IMAGE', 'VIDEO')", name="ck_batch_kind"),)
+
+    id: Mapped[UuidPk]
+    scene_id: Mapped[UUID] = mapped_column(
+        Uuid(as_uuid=True), ForeignKey("scenes.id", ondelete="CASCADE"), index=True
+    )
+    kind: Mapped[GenerationKind] = mapped_column(Enum(GenerationKind, native_enum=False))
+    requested_count: Mapped[int] = mapped_column(Integer)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.current_timestamp()
+    )
 
 
 class CutImage(Base):

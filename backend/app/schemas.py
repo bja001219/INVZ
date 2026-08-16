@@ -102,7 +102,12 @@ class GenerationJobResponse(BaseModel):
     version: int
     status: JobStatus
     prompt: str
+    generation_mode: str = Field(serialization_alias="generationMode")
     source_image_id: UUID | None = Field(serialization_alias="sourceImageId")
+    reference_image_id: UUID | None = Field(
+        default=None, serialization_alias="referenceImageId"
+    )
+    batch_id: UUID | None = Field(default=None, serialization_alias="batchId")
     attempt_count: int = Field(serialization_alias="attemptCount")
     max_attempts: int = Field(serialization_alias="maxAttempts")
     next_run_at: datetime | None = Field(serialization_alias="nextRunAt")

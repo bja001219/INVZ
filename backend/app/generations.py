@@ -15,6 +15,8 @@ async def create_image_job(
     request: CreateGenerationRequest,
     *,
     max_attempts: int = 3,
+    generation_mode: str = "MOCK",
+    batch_id: UUID | None = None,
 ) -> GenerationJob:
     return await _create_job(
         session,
@@ -22,6 +24,8 @@ async def create_image_job(
         kind=GenerationKind.IMAGE,
         request=request,
         max_attempts=max_attempts,
+        generation_mode=generation_mode,
+        batch_id=batch_id,
     )
 
 
@@ -31,6 +35,8 @@ async def create_video_job(
     request: CreateGenerationRequest,
     *,
     max_attempts: int = 3,
+    generation_mode: str = "MOCK",
+    batch_id: UUID | None = None,
 ) -> GenerationJob:
     return await _create_job(
         session,
@@ -38,6 +44,8 @@ async def create_video_job(
         kind=GenerationKind.VIDEO,
         request=request,
         max_attempts=max_attempts,
+        generation_mode=generation_mode,
+        batch_id=batch_id,
     )
 
 
@@ -96,6 +104,8 @@ async def _create_job(
     kind: GenerationKind,
     request: CreateGenerationRequest,
     max_attempts: int,
+    generation_mode: str = "MOCK",
+    batch_id: UUID | None = None,
 ) -> GenerationJob:
     try:
         async with session.begin():
@@ -118,7 +128,9 @@ async def _create_job(
                 version=version,
                 status=JobStatus.QUEUED,
                 prompt=prompt,
+                generation_mode=generation_mode,
                 source_image_id=source_image_id,
+                batch_id=batch_id,
                 attempt_count=0,
                 max_attempts=max_attempts,
                 mock_scenario=_normalized_mock_scenario(request.mock_scenario),
