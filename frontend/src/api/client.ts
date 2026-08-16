@@ -1,6 +1,8 @@
 import type {
   ApiErrorBody,
   Config,
+  GenerationBatch,
+  GenerationMode,
   GenerationJob,
   GenerationKind,
   MockScenario,
@@ -65,6 +67,8 @@ function jsonRequest(method: "POST" | "PUT", body: object): RequestInit {
 
 export const api = {
   getConfig: () => request<Config>("/api/config"),
+  setGenerationMode: (generationMode: GenerationMode) =>
+    request<Config>("/api/config", jsonRequest("PUT", { generationMode })),
   createScene: (prompt: string) =>
     request<Scene>("/api/scenes", jsonRequest("POST", { prompt })),
   getScene: (sceneId: string) =>
@@ -76,6 +80,15 @@ export const api = {
   ) =>
     request<GenerationJob>(
       `/api/cuts/${encodeURIComponent(cutId)}/${kind === "IMAGE" ? "images" : "videos"}`,
+      jsonRequest("POST", mockScenario ? { mockScenario } : {}),
+    ),
+  createBatch: (
+    sceneId: string,
+    kind: GenerationKind,
+    mockScenario?: MockScenario,
+  ) =>
+    request<GenerationBatch>(
+      `/api/scenes/${encodeURIComponent(sceneId)}/${kind === "IMAGE" ? "images" : "videos"}`,
       jsonRequest("POST", mockScenario ? { mockScenario } : {}),
     ),
   selectImage: (cutId: string, imageId: string) =>

@@ -3,6 +3,7 @@ import { FormEvent, useEffect, useState } from "react";
 
 import { api, errorMessage } from "../api/client";
 import { SceneWorkspace } from "../features/scene/SceneWorkspace";
+import { ModeSwitch } from "./ModeSwitch";
 
 function sceneIdFromUrl(): string | null {
   return new URL(window.location.href).searchParams.get("scene");
@@ -54,10 +55,13 @@ export function App() {
         ) : configQuery.isError ? (
           <span className="mode-badge mode-badge--error">Mode unavailable</span>
         ) : (
-          <span className={`mode-badge mode-badge--${configQuery.data.generationMode.toLowerCase()}`}>
-            <span className="status-dot" aria-hidden="true" />
-            {modeLabel}
-          </span>
+          <div className="header-mode">
+            <span className={`mode-badge mode-badge--${configQuery.data.generationMode.toLowerCase()}`}>
+              <span className="status-dot" aria-hidden="true" />
+              {modeLabel}
+            </span>
+            <ModeSwitch config={configQuery.data} />
+          </div>
         )}
       </header>
 

@@ -3,7 +3,8 @@ export type GenerationMode = "MOCK" | "LIVE";
 export type MockScenario =
   | "SUCCESS"
   | "FAIL_TWICE_THEN_SUCCEED"
-  | "ALWAYS_FAIL";
+  | "ALWAYS_FAIL"
+  | "SUCCEED_VIA_WEBHOOK";
 
 export type GenerationKind = "IMAGE" | "VIDEO";
 
@@ -17,6 +18,32 @@ export type JobStatus =
 
 export interface Config {
   generationMode: GenerationMode;
+  liveAvailable: boolean;
+}
+
+export interface CharacterProfile {
+  name: string;
+  role: string;
+  ageRange: string;
+  hairColor: string;
+  hairStyle: string;
+  outfit: string;
+  build: string;
+  faceImpression: string;
+  signatureProp: string;
+}
+
+export interface BatchSkip {
+  cutId: string;
+  reason: string;
+}
+
+export interface GenerationBatch {
+  id: string;
+  kind: GenerationKind;
+  requestedCount: number;
+  createdJobIds: string[];
+  skipped: BatchSkip[];
 }
 
 export interface GenerationJob {
@@ -25,7 +52,10 @@ export interface GenerationJob {
   version: number;
   status: JobStatus;
   prompt: string;
+  generationMode: GenerationMode;
   sourceImageId: string | null;
+  referenceImageId: string | null;
+  batchId: string | null;
   attemptCount: number;
   maxAttempts: number;
   nextRunAt: string | null;
@@ -54,6 +84,8 @@ export interface CutVideo {
 export interface Cut {
   id: string;
   order: number;
+  shotDescription: string;
+  videoMotion: string;
   imagePrompt: string;
   videoPrompt: string;
   durationSec: 5;
@@ -70,6 +102,7 @@ export interface Scene {
   userPrompt: string;
   title: string;
   scenario: string;
+  characterProfiles: CharacterProfile[];
   cuts: Cut[];
 }
 

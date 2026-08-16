@@ -4,6 +4,8 @@ import { api, errorMessage } from "../../api/client";
 import type { GenerationMode, Scene } from "../../api/types";
 import { CutCard } from "../generations/CutCard";
 import { SequencePlayer } from "../player/SequencePlayer";
+import { BatchControls } from "./BatchControls";
+import { CharacterPanel } from "./CharacterPanel";
 
 const activeStatuses = new Set(["QUEUED", "SUBMITTING", "PROCESSING", "RETRY_WAIT"]);
 
@@ -50,6 +52,10 @@ export function SceneWorkspace({ sceneId, generationMode }: SceneWorkspaceProps)
           <div><dt>Nominal duration</dt><dd>30 sec</dd></div>
         </dl>
       </header>
+
+      <CharacterPanel profiles={scene.characterProfiles} />
+
+      <BatchControls cuts={orderedCuts} generationMode={generationMode} sceneId={sceneId} />
 
       <SequencePlayer cuts={orderedCuts} />
 

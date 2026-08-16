@@ -1,4 +1,5 @@
 import type {
+  CharacterProfile,
   Cut,
   CutImage,
   CutVideo,
@@ -7,6 +8,33 @@ import type {
 } from "../api/types";
 
 const timestamp = "2026-08-14T12:00:00Z";
+
+export function twoProfiles(): CharacterProfile[] {
+  return [
+    {
+      name: "Mina",
+      role: "female lead high-school student",
+      ageRange: "17",
+      hairColor: "dark brown",
+      hairStyle: "long straight",
+      outfit: "navy sailor uniform with a red ribbon",
+      build: "slim",
+      faceImpression: "soft calm expression",
+      signatureProp: "a stack of library books",
+    },
+    {
+      name: "Jun",
+      role: "male lead high-school student",
+      ageRange: "17",
+      hairColor: "black",
+      hairStyle: "short messy",
+      outfit: "grey blazer uniform",
+      build: "tall lean",
+      faceImpression: "bright open smile",
+      signatureProp: "a worn canvas backpack",
+    },
+  ];
+}
 
 export function generationJob(
   overrides: Partial<GenerationJob> = {},
@@ -17,7 +45,10 @@ export function generationJob(
     version: 1,
     status: "SUCCEEDED",
     prompt: "A silver rocket waits on the moon",
+    generationMode: "MOCK",
     sourceImageId: null,
+    referenceImageId: null,
+    batchId: null,
     attemptCount: 1,
     maxAttempts: 3,
     nextRunAt: null,
@@ -32,6 +63,8 @@ export function cutDetail(overrides: Partial<Cut> = {}): Cut {
   return {
     id: "cut-1",
     order: 1,
+    shotDescription: "The two leads meet at the school gate",
+    videoMotion: "slow push in",
     imagePrompt: "A silver rocket waits on the moon",
     videoPrompt: "The rocket rises through a field of stars",
     durationSec: 5,
@@ -51,6 +84,7 @@ export function sceneDetail(overrides: Partial<Scene> = {}): Scene {
     userPrompt: "moon voyage",
     title: "Moon Voyage",
     scenario: "A lone rocket crosses the night sky.",
+    characterProfiles: twoProfiles(),
     cuts: Array.from({ length: 6 }, (_, index) =>
       cutDetail({ id: `cut-${index + 1}`, order: index + 1 }),
     ),

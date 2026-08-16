@@ -7,6 +7,7 @@ import { describe, expect, it } from "vitest";
 import { CutCard } from "./CutCard";
 import type { GenerationMode, Scene } from "../../api/types";
 import {
+  cutDetail,
   cutWithFailedVideo,
   cutWithImageAndVideoVersions,
   cutWithoutImage,
@@ -59,6 +60,39 @@ function renderCut(cut = cutWithoutImage(), generationMode: GenerationMode = "MO
 }
 
 describe("CutCard", () => {
+  it("shows the shot description, generation mode, and reference image of each job", () => {
+    const firstJob = generationJob({ id: "image-job-1", version: 1 });
+    const anchor = {
+      id: "image-1",
+      generationJobId: firstJob.id,
+      url: "/media/mock/cut-image.png",
+      inputPrompt: firstJob.prompt,
+      createdAt: "2026-08-14T12:00:00Z",
+    };
+    const secondJob = generationJob({
+      id: "image-job-2",
+      version: 2,
+      generationMode: "LIVE",
+      referenceImageId: anchor.id,
+    });
+
+    renderCut(
+      cutDetail({
+        shotDescription: "The two leads meet at the school gate",
+        imageJobs: [secondJob, firstJob],
+        images: [anchor],
+      }),
+    );
+
+    expect(screen.getByText("The two leads meet at the school gate")).toBeInTheDocument();
+    const referencedJob = screen.getByRole("article", { name: "Image generation v2" });
+    expect(within(referencedJob).getByText("LIVE")).toBeInTheDocument();
+    expect(within(referencedJob).getByText("Image v1")).toBeInTheDocument();
+    const anchorJob = screen.getByRole("article", { name: "Image generation v1" });
+    expect(within(anchorJob).getByText("MOCK")).toBeInTheDocument();
+    expect(within(anchorJob).queryByText("Reference")).not.toBeInTheDocument();
+  });
+
   it("disables generation immediately while the mutation is pending", async () => {
     const user = userEvent.setup();
     const receivedImageRequests: unknown[] = [];

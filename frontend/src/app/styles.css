@@ -125,3 +125,125 @@ textarea:focus, select:focus { border-color: var(--accent); box-shadow: 0 0 0 3p
   .sequence-player__controls { align-items: stretch; flex-direction: column; }
   .sequence-player__controls .button { width: 100%; }
 }
+
+/* Character sheet, batch controls, runtime mode switch */
+
+.header-mode {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+}
+
+.mode-switch {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+  font-size: 0.8rem;
+}
+
+.mode-switch__label {
+  opacity: 0.65;
+}
+
+.mode-switch__options {
+  display: inline-flex;
+  border: 1px solid currentColor;
+  border-radius: 999px;
+  overflow: hidden;
+}
+
+.mode-switch__option {
+  border: 0;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  padding: 0.2rem 0.75rem;
+  font: inherit;
+}
+
+.mode-switch__option.is-selected {
+  background: currentColor;
+  filter: invert(1);
+}
+
+.mode-switch__option:disabled:not(.is-selected) {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.mode-switch__hint {
+  opacity: 0.55;
+}
+
+.character-panel,
+.batch-controls {
+  margin: 1.5rem 0;
+  padding: 1rem 1.25rem;
+  border: 1px solid rgba(127, 127, 127, 0.25);
+  border-radius: 14px;
+}
+
+.character-list {
+  list-style: none;
+  margin: 0.75rem 0 0;
+  padding: 0;
+  display: grid;
+  gap: 1rem;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+}
+
+.character-card h4 {
+  margin: 0 0 0.15rem;
+}
+
+.character-card__role {
+  margin: 0 0 0.5rem;
+  opacity: 0.7;
+  font-size: 0.85rem;
+}
+
+.character-card dl {
+  margin: 0;
+  display: grid;
+  gap: 0.2rem;
+  font-size: 0.85rem;
+}
+
+.character-card dl > div {
+  display: grid;
+  grid-template-columns: 5.5rem 1fr;
+  gap: 0.5rem;
+}
+
+.character-card dt {
+  opacity: 0.6;
+}
+
+.character-card dd {
+  margin: 0;
+}
+
+.batch-controls__row {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  flex-wrap: wrap;
+  margin-top: 0.75rem;
+}
+
+.batch-controls__row p {
+  margin: 0;
+  font-size: 0.9rem;
+  opacity: 0.8;
+}
+
+.mode-tag {
+  font-size: 0.65rem;
+  letter-spacing: 0.08em;
+  padding: 0.1rem 0.4rem;
+  border-radius: 999px;
+  border: 1px solid currentColor;
+  opacity: 0.7;
+}

@@ -39,10 +39,10 @@ function jobStatus(job: GenerationJob): string {
   return `${label[0].toUpperCase()}${label.slice(1)} · ${job.attemptCount}/${job.maxAttempts} attempts`;
 }
 
-function sourceImageLabel(job: GenerationJob, cut: Cut): string | null {
-  if (!job.sourceImageId) return null;
-  const image = cut.images.find((candidate) => candidate.id === job.sourceImageId);
-  if (!image) return job.sourceImageId;
+function imageVersionLabel(imageId: string | null, cut: Cut): string | null {
+  if (!imageId) return null;
+  const image = cut.images.find((candidate) => candidate.id === imageId);
+  if (!image) return imageId;
   return `Image v${versionForArtifact(image.generationJobId, cut.imageJobs)}`;
 }
 
@@ -59,7 +59,8 @@ function GenerationHistory({ cut, jobs, kind }: {
   return (
     <div className="history-list">
       {sortedJobs.map((job) => {
-        const sourceImage = sourceImageLabel(job, cut);
+        const sourceImage = imageVersionLabel(job.sourceImageId, cut);
+        const referenceImage = imageVersionLabel(job.referenceImageId, cut);
         return (
           <article
             aria-label={`${title} generation v${job.version}`}
@@ -68,10 +69,14 @@ function GenerationHistory({ cut, jobs, kind }: {
           >
             <div className="job__heading">
               <strong>{title} v{job.version}</strong>
+              <span className={`mode-tag mode-tag--${job.generationMode.toLowerCase()}`}>
+                {job.generationMode}
+              </span>
               <span className="job__status">{jobStatus(job)}</span>
             </div>
             <p><span>Prompt</span>{job.prompt}</p>
             {sourceImage && <p><span>Source image</span>{sourceImage}</p>}
+            {referenceImage && <p><span>Reference</span>{referenceImage}</p>}
             {job.nextRunAt && (
               <p><span>Next retry</span><time dateTime={job.nextRunAt}>{new Date(job.nextRunAt).toLocaleString()}</time></p>
             )}
@@ -160,6 +165,8 @@ export function CutCard({ cut, sceneId, generationMode }: CutCardProps) {
         </div>
         <span className="duration">{cut.durationSec} sec</span>
       </header>
+
+      <p className="prompt-copy"><span>Shot</span>{cut.shotDescription}</p>
 
       {generationMode === "MOCK" && (
         <label className="scenario-control">
