@@ -34,8 +34,92 @@ async def test_config_exposes_mode_without_secrets(client) -> None:
     response = await client.get("/api/config")
 
     assert response.status_code == 200
-    assert response.json() == {"generationMode": "MOCK"}
+    assert response.json() == {"generationMode": "MOCK", "liveAvailable": False}
     assert "api" not in response.text.lower()
+
+
+async def test_switching_to_live_without_keys_is_rejected(client) -> None:
+    response = await client.put("/api/config", json={"generationMode": "LIVE"})
+
+    assert response.status_code == 409
+    assert response.json() == {
+        "code": "LIVE_MODE_UNAVAILABLE",
+        "message": "Live mode is not configured",
+    }
+    assert (await client.get("/api/config")).json()["generationMode"] == "MOCK"
+
+
+async def test_config_rejects_an_unknown_mode(client) -> None:
+    response = await client.put("/api/config", json={"generationMode": "TURBO"})
+
+    assert response.status_code == 422
+    assert response.json() == {
+        "code": "REQUEST_VALIDATION_FAILED",
+        "message": "Request validation failed",
+    }
+
+
+@pytest_asyncio.fixture
+async def live_capable_client(
+    settings_factory: Callable[..., Settings],
+) -> AsyncIterator[httpx.AsyncClient]:
+    """Mock mode at startup, but with keys present so LIVE can be selected at runtime."""
+    settings = settings_factory(
+        generation_mode="mock",
+        openai_api_key=SecretStr(_OPENAI_SECRET),
+        kie_api_key=SecretStr(_KIE_SECRET),
+    )
+    application = create_app(settings)
+    async with application.state.engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    transport = httpx.ASGITransport(app=application)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as test_client:
+        yield test_client
+    await application.state.engine.dispose()
+
+
+async def test_live_becomes_selectable_once_both_keys_exist(
+    live_capable_client: httpx.AsyncClient,
+) -> None:
+    assert (await live_capable_client.get("/api/config")).json() == {
+        "generationMode": "MOCK",
+        "liveAvailable": True,
+    }
+
+    switched = await live_capable_client.put("/api/config", json={"generationMode": "LIVE"})
+
+    assert switched.status_code == 200
+    assert switched.json() == {"generationMode": "LIVE", "liveAvailable": True}
+
+
+async def test_mode_switch_applies_to_new_jobs_and_leaves_existing_ones_alone(
+    live_capable_client: httpx.AsyncClient,
+) -> None:
+    scene = (await live_capable_client.post("/api/scenes", json={"prompt": "moon"})).json()
+    first_cut, second_cut = scene["cuts"][0], scene["cuts"][1]
+    before = await live_capable_client.post(f"/api/cuts/{first_cut['id']}/images", json={})
+
+    await live_capable_client.put("/api/config", json={"generationMode": "LIVE"})
+    after = await live_capable_client.post(f"/api/cuts/{second_cut['id']}/images", json={})
+
+    assert before.json()["generationMode"] == "MOCK"
+    assert after.json()["generationMode"] == "LIVE"
+    detail = (await live_capable_client.get(f"/api/scenes/{scene['id']}")).json()
+    assert detail["cuts"][0]["imageJobs"][0]["generationMode"] == "MOCK"
+
+
+async def test_live_mode_rejects_a_mock_scenario_after_switching(
+    live_capable_client: httpx.AsyncClient,
+) -> None:
+    scene = (await live_capable_client.post("/api/scenes", json={"prompt": "moon"})).json()
+    await live_capable_client.put("/api/config", json={"generationMode": "LIVE"})
+
+    response = await live_capable_client.post(
+        f"/api/cuts/{scene['cuts'][0]['id']}/images", json={"mockScenario": "SUCCESS"}
+    )
+
+    assert response.status_code == 422
+    assert response.json()["code"] == "GENERATION_REQUEST_INVALID"
 
 
 def test_live_mode_requires_both_keys(settings_factory) -> None:

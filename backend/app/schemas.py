@@ -12,6 +12,14 @@ class ConfigResponse(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
     generation_mode: str = Field(serialization_alias="generationMode")
+    # Whether LIVE can be selected at all. Never reports key presence in any more detail.
+    live_available: bool = Field(serialization_alias="liveAvailable")
+
+
+class UpdateConfigRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    generation_mode: Literal["MOCK", "LIVE"] = Field(alias="generationMode")
 
 
 class CharacterProfile(BaseModel):

@@ -36,6 +36,8 @@ class GenerationRequest:
     attempt_count: int
     # The scene anchor image an IMAGE request should stay visually consistent with.
     reference_image_url: str | None = None
+    # The mode snapshot taken when the job was created; decides which provider handles it.
+    generation_mode: str = "MOCK"
 
 
 @dataclass(frozen=True)

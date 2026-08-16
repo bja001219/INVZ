@@ -16,10 +16,10 @@ from app.core.db import build_engine
 from app.core.errors import AppError, register_error_handlers
 from app.core.logging import configure_secret_redaction
 from app.generations import create_image_job, create_video_job, select_image, select_video
-from app.providers.contracts import GenerationProvider
 from app.providers.kie import KieGenerationProvider
 from app.providers.mock import MockGenerationProvider, MockSceneProvider
 from app.providers.openai_scene import OpenAISceneProvider
+from app.runtime import ProviderRegistry, RuntimeMode
 from app.scenes import _job_response, create_scene, get_scene
 from app.schemas import (
     BatchResponse,
@@ -30,6 +30,7 @@ from app.schemas import (
     SceneResponse,
     SelectImageRequest,
     SelectVideoRequest,
+    UpdateConfigRequest,
     normalize_mock_scenario,
 )
 from app.worker import GenerationWorker
@@ -39,22 +40,35 @@ def create_app(settings: Settings, *, generation_worker: GenerationWorker | None
     engine = build_engine(settings.database_url)
     session_factory = async_sessionmaker(engine, expire_on_commit=False)
 
-    generation_provider: GenerationProvider | None = None
+    # Both provider pairs are constructed up front so the mode can flip without a restart.
+    # Live is only constructible when both keys are present, which is exactly what
+    # `liveAvailable` reports.
+    live_scene: OpenAISceneProvider | None = None
+    live_generation: KieGenerationProvider | None = None
+    if settings.openai_api_key.get_secret_value().strip() and (
+        settings.kie_api_key.get_secret_value().strip()
+    ):
+        live_scene = OpenAISceneProvider(api_key=settings.openai_api_key.get_secret_value())
+        live_generation = KieGenerationProvider(api_key=settings.kie_api_key.get_secret_value())
+
+    registry = ProviderRegistry(
+        mock_scene=MockSceneProvider(),
+        mock_generation=MockGenerationProvider(),
+        live_scene=live_scene,
+        live_generation=live_generation,
+    )
+    runtime_mode = RuntimeMode(settings.generation_mode, live_available=registry.live_available)
+
     if generation_worker is None:
-        if settings.generation_mode is GenerationMode.MOCK:
-            generation_provider = MockGenerationProvider()
-        else:
-            generation_provider = KieGenerationProvider(
-                api_key=settings.kie_api_key.get_secret_value()
-            )
         generation_worker = GenerationWorker(
             session_factory=session_factory,
-            provider=generation_provider,
+            provider=registry.generation_provider(GenerationMode.MOCK),
             clock=Clock(),
             retry_base_delay_sec=settings.retry_base_delay_sec,
             provider_poll_interval_sec=settings.provider_poll_interval_sec,
             generation_attempt_timeout_sec=settings.generation_attempt_timeout_sec,
             concurrency=settings.generation_concurrency,
+            provider_registry=registry,
         )
 
     @asynccontextmanager
@@ -64,24 +78,19 @@ def create_app(settings: Settings, *, generation_worker: GenerationWorker | None
             yield
         finally:
             await generation_worker.stop()
-            if isinstance(generation_provider, KieGenerationProvider):
-                await generation_provider.aclose()
+            if live_generation is not None:
+                await live_generation.aclose()
             await engine.dispose()
 
     application = FastAPI(title="InvzAssign Prompt-to-Animation MVP", lifespan=lifespan)
     register_error_handlers(application)
     application.state.engine = engine
     application.state.generation_worker = generation_worker
+    application.state.runtime_mode = runtime_mode
 
     async def get_app_session() -> AsyncIterator[AsyncSession]:
         async with session_factory() as session:
             yield session
-
-    scene_provider: MockSceneProvider | OpenAISceneProvider
-    if settings.generation_mode is GenerationMode.MOCK:
-        scene_provider = MockSceneProvider()
-    else:
-        scene_provider = OpenAISceneProvider(api_key=settings.openai_api_key.get_secret_value())
 
     application.add_middleware(
         CORSMiddleware,
@@ -109,9 +118,20 @@ def create_app(settings: Settings, *, generation_worker: GenerationWorker | None
     async def health() -> dict[str, str]:
         return {"status": "ok"}
 
+    def _config_response() -> ConfigResponse:
+        return ConfigResponse(
+            generation_mode=runtime_mode.name,
+            live_available=runtime_mode.live_available,
+        )
+
     @application.get("/api/config", response_model=ConfigResponse)
     async def config() -> ConfigResponse:
-        return ConfigResponse(generation_mode=settings.generation_mode.name)
+        return _config_response()
+
+    @application.put("/api/config", response_model=ConfigResponse)
+    async def update_config(payload: UpdateConfigRequest) -> ConfigResponse:
+        runtime_mode.set(GenerationMode[payload.generation_mode])
+        return _config_response()
 
     @application.post(
         "/api/scenes",
@@ -124,7 +144,7 @@ def create_app(settings: Settings, *, generation_worker: GenerationWorker | None
     ) -> SceneResponse:
         return await create_scene(
             session,
-            scene_provider,
+            registry.scene_provider(runtime_mode.current),
             payload.prompt,
             max_attempts=settings.generation_max_attempts,
             retry_base_delay_sec=settings.retry_base_delay_sec,
@@ -138,7 +158,7 @@ def create_app(settings: Settings, *, generation_worker: GenerationWorker | None
         return await get_scene(session, scene_id)
 
     def validate_generation_request(payload: CreateGenerationRequest) -> None:
-        if settings.generation_mode is GenerationMode.LIVE and payload.mock_scenario is not None:
+        if runtime_mode.current is GenerationMode.LIVE and payload.mock_scenario is not None:
             raise AppError(
                 status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
                 code="GENERATION_REQUEST_INVALID",
@@ -165,7 +185,11 @@ def create_app(settings: Settings, *, generation_worker: GenerationWorker | None
     ) -> GenerationJobResponse:
         validate_generation_request(payload)
         job = await create_image_job(
-            session, cut_id, payload, max_attempts=settings.generation_max_attempts
+            session,
+            cut_id,
+            payload,
+            max_attempts=settings.generation_max_attempts,
+            generation_mode=runtime_mode.name,
         )
         return _job_response(job)
 
@@ -181,7 +205,11 @@ def create_app(settings: Settings, *, generation_worker: GenerationWorker | None
     ) -> GenerationJobResponse:
         validate_generation_request(payload)
         job = await create_video_job(
-            session, cut_id, payload, max_attempts=settings.generation_max_attempts
+            session,
+            cut_id,
+            payload,
+            max_attempts=settings.generation_max_attempts,
+            generation_mode=runtime_mode.name,
         )
         return _job_response(job)
 
@@ -201,7 +229,7 @@ def create_app(settings: Settings, *, generation_worker: GenerationWorker | None
             scene_id,
             payload,
             max_attempts=settings.generation_max_attempts,
-            generation_mode=settings.generation_mode.name,
+            generation_mode=runtime_mode.name,
         )
 
     @application.post(
@@ -220,7 +248,7 @@ def create_app(settings: Settings, *, generation_worker: GenerationWorker | None
             scene_id,
             payload,
             max_attempts=settings.generation_max_attempts,
-            generation_mode=settings.generation_mode.name,
+            generation_mode=runtime_mode.name,
         )
 
     @application.put("/api/cuts/{cut_id}/selected-image", response_model=SceneResponse)

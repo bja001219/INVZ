@@ -17,6 +17,7 @@ from app.providers.contracts import (
     SubmissionUncertainError,
     TaskResult,
 )
+from app.runtime import ProviderRegistry
 from app.schemas import MockScenario
 
 logger = logging.getLogger(__name__)
@@ -42,9 +43,11 @@ class GenerationWorker:
         provider_poll_interval_sec: float,
         generation_attempt_timeout_sec: float,
         concurrency: int = 1,
+        provider_registry: ProviderRegistry | None = None,
     ) -> None:
         self._session_factory = session_factory
         self._provider = provider
+        self._provider_registry = provider_registry
         self._clock = clock
         self._retry_base_delay_sec = retry_base_delay_sec
         self._provider_poll_interval_sec = provider_poll_interval_sec
@@ -55,6 +58,12 @@ class GenerationWorker:
     @property
     def task(self) -> asyncio.Task[None] | None:
         return self._task
+
+    def _provider_for(self, generation_mode: str) -> GenerationProvider:
+        """Follow the job's own mode snapshot, never the current runtime mode."""
+        if self._provider_registry is None:
+            return self._provider
+        return self._provider_registry.generation_provider(generation_mode)
 
     async def start(self) -> None:
         if self._task is None:
@@ -97,9 +106,7 @@ class GenerationWorker:
         polls = await self._claim_due_polls(self._concurrency)
         if not polls:
             return False
-        await asyncio.gather(
-            *(self._poll(job_id, external_task_id) for job_id, external_task_id in polls)
-        )
+        await asyncio.gather(*(self._poll(*poll) for poll in polls))
         return True
 
     async def _recover_one_submitting(self) -> bool:
@@ -197,6 +204,7 @@ class GenerationWorker:
                         mock_scenario=scenario,
                         attempt_count=job.attempt_count,
                         reference_image_url=reference_image_url,
+                        generation_mode=job.generation_mode,
                     )
                 )
         return touched, requests
@@ -235,7 +243,7 @@ class GenerationWorker:
 
     async def _submit(self, request: GenerationRequest) -> None:
         try:
-            submission = await self._provider.submit(request)
+            submission = await self._provider_for(request.generation_mode).submit(request)
         except SubmissionUncertainError:
             await self._fail(
                 request.job_id,
@@ -291,7 +299,7 @@ class GenerationWorker:
             )
             return True
 
-    async def _claim_due_polls(self, limit: int) -> list[tuple[UUID, str]]:
+    async def _claim_due_polls(self, limit: int) -> list[tuple[UUID, str, str]]:
         now = self._clock.now()
         async with self._session_factory() as session:
             jobs = list(
@@ -309,11 +317,15 @@ class GenerationWorker:
                     .limit(limit)
                 )
             )
-        return [(job.id, job.external_task_id) for job in jobs if job.external_task_id]
+        return [
+            (job.id, job.external_task_id, job.generation_mode)
+            for job in jobs
+            if job.external_task_id
+        ]
 
-    async def _poll(self, job_id: UUID, external_task_id: str) -> None:
+    async def _poll(self, job_id: UUID, external_task_id: str, generation_mode: str) -> None:
         try:
-            result = await self._provider.poll(external_task_id)
+            result = await self._provider_for(generation_mode).poll(external_task_id)
         except RetryableProviderError as error:
             async with self._session_factory() as session, session.begin():
                 job = await session.get(GenerationJob, job_id)
