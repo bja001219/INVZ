@@ -6,6 +6,8 @@ export default defineConfig({
     port: 5173,
   },
   test: {
+    // `e2e/` belongs to Playwright; Vitest must not try to collect those specs.
+    include: ["src/**/*.{test,spec}.{ts,tsx}"],
     environment: "jsdom",
     setupFiles: "./src/test/setup.ts",
     css: true,

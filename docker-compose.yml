@@ -1,0 +1,35 @@
+# Local evaluation only. Both services publish on 127.0.0.1, so nothing is reachable
+# from the LAN or the public internet. This stack has no authentication.
+name: invzassign
+
+services:
+  backend:
+    build:
+      context: ./backend
+    environment:
+      GENERATION_MODE: mock
+      DATABASE_URL: sqlite+aiosqlite:///./data/app-mock.db
+      FRONTEND_ORIGIN: http://localhost:5173
+      GENERATION_MAX_ATTEMPTS: "3"
+      RETRY_BASE_DELAY_SEC: "1"
+      PROVIDER_POLL_INTERVAL_SEC: "1"
+      GENERATION_ATTEMPT_TIMEOUT_SEC: "120"
+    ports:
+      - "127.0.0.1:8000:8000"
+    volumes:
+      - backend-data:/app/data
+
+  frontend:
+    build:
+      context: ./frontend
+      args:
+        VITE_API_BASE_URL: http://localhost:8000
+    ports:
+      - "127.0.0.1:5173:5173"
+    depends_on:
+      backend:
+        # Uses the backend image HEALTHCHECK, which polls GET /health.
+        condition: service_healthy
+
+volumes:
+  backend-data:

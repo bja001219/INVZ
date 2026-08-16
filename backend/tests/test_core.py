@@ -1,17 +1,23 @@
 import logging
 import socket
 import warnings
+from collections.abc import AsyncIterator, Callable
 from io import StringIO
 from uuid import uuid4
 
+import httpx
 import pytest
+import pytest_asyncio
+from fastapi import FastAPI
 from pydantic import SecretStr, ValidationError
 from pytest_socket import SocketConnectBlockedError
 from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError, SAWarning
+from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from app.core.config import Settings
 from app.core.logging import SecretRedactionFilter
+from app.main import create_app
 from app.models import Base, Cut, GenerationJob, GenerationKind, JobStatus, Scene
 
 
@@ -252,3 +258,103 @@ def test_metadata_foreign_keys_have_a_resolvable_creation_order() -> None:
         sorted_tables = list(Base.metadata.sorted_tables)
 
     assert len(sorted_tables) == 5
+
+
+# Deliberately not shaped like a real `sk-…` key, so the repository secret scan documented
+# in the README stays clean while still exercising a long, distinctive secret value.
+_OPENAI_SECRET = "openai-live-secret-0123456789abcdef"
+_KIE_SECRET = "kie-live-secret-0123456789abcdef"
+
+
+def _credential_echoing_error(secret: str) -> httpx.Response:
+    """A provider failure whose body and headers echo the caller's credentials back."""
+    return httpx.Response(
+        401,
+        json={
+            "code": 401,
+            "msg": f"Invalid credentials: Bearer {secret}",
+            "error": {"message": f"Incorrect API key provided: {secret}"},
+        },
+        headers={"x-echoed-authorization": f"Bearer {secret}"},
+    )
+
+
+@pytest_asyncio.fixture
+async def live_application(
+    settings_factory: Callable[..., Settings],
+) -> AsyncIterator[tuple[FastAPI, Settings]]:
+    settings = settings_factory(
+        generation_mode="live",
+        openai_api_key=SecretStr(_OPENAI_SECRET),
+        kie_api_key=SecretStr(_KIE_SECRET),
+    )
+    application = create_app(settings)
+    async with application.state.engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    try:
+        yield application, settings
+    finally:
+        await application.state.engine.dispose()
+
+
+async def _trigger_stubbed_provider_failure(application: FastAPI, respx_mock) -> str:
+    """Fail one Scene call and one generation job, then read every user-facing surface."""
+    respx_mock.post("https://api.openai.com/v1/responses").mock(
+        return_value=_credential_echoing_error(_OPENAI_SECRET)
+    )
+    respx_mock.post("https://api.kie.ai/api/v1/jobs/createTask").mock(
+        return_value=_credential_echoing_error(_KIE_SECRET)
+    )
+
+    factory = async_sessionmaker(application.state.engine, expire_on_commit=False)
+    async with factory.begin() as session:
+        scene = Scene(user_prompt="moon voyage", title="Moon Voyage", scenario="Scenario")
+        session.add(scene)
+        await session.flush()
+        cut = Cut(
+            scene_id=scene.id,
+            order=1,
+            image_prompt="image prompt",
+            video_prompt="video prompt",
+            duration_sec=5,
+        )
+        session.add(cut)
+        await session.flush()
+        scene_id, cut_id = scene.id, cut.id
+
+    transport = httpx.ASGITransport(app=application)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        scene_failure = await client.post("/api/scenes", json={"prompt": "moon voyage"})
+        accepted = await client.post(f"/api/cuts/{cut_id}/images", json={})
+        await application.state.generation_worker.run_once()
+        detail = await client.get(f"/api/scenes/{scene_id}")
+
+    assert scene_failure.status_code == 502
+    assert scene_failure.json() == {
+        "code": "SCENE_PROVIDER_FAILED",
+        "message": "Scene provider failed",
+    }
+    assert accepted.status_code == 202
+    failed_job = detail.json()["cuts"][0]["imageJobs"][0]
+    assert failed_job["status"] == "FAILED"
+    # startswith, not equality: a leaked provider body must reach the secret assertions
+    # below instead of failing this precondition first.
+    assert failed_job["lastErrorCode"].startswith("KIE_REQUEST_FAILED")
+    return "\n".join([scene_failure.text, accepted.text, detail.text])
+
+
+@pytest.mark.parametrize("secret_name", ["openai_api_key", "kie_api_key"])
+async def test_provider_error_never_serializes_configured_secrets(
+    live_application: tuple[FastAPI, Settings], caplog, respx_mock, secret_name: str
+) -> None:
+    application, settings = live_application
+    secret_field: SecretStr = getattr(settings, secret_name)
+    secret = secret_field.get_secret_value()
+
+    responses = await _trigger_stubbed_provider_failure(application, respx_mock)
+
+    serialized = responses + "\n" + caplog.text + "\n" + repr(settings)
+    assert secret
+    assert secret not in serialized
+    assert "Authorization" not in serialized
+    assert "Bearer " not in serialized

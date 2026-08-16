@@ -1,0 +1,15 @@
+{
+  "compilerOptions": {
+    "composite": true,
+    "skipLibCheck": true,
+    "target": "ES2022",
+    "lib": ["ES2022", "DOM"],
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "strict": true,
+    "noEmit": true,
+    "types": [],
+    "tsBuildInfoFile": "./node_modules/.cache/tsconfig.e2e.tsbuildinfo"
+  },
+  "include": ["playwright.config.ts", "e2e"]
+}
