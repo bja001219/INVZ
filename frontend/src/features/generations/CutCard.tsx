@@ -178,6 +178,7 @@ export function CutCard({ cut, sceneId, generationMode }: CutCardProps) {
             <option value="SUCCESS">Success</option>
             <option value="FAIL_TWICE_THEN_SUCCEED">Fail twice, then succeed</option>
             <option value="ALWAYS_FAIL">Always fail</option>
+            <option value="SUCCEED_VIA_WEBHOOK">Succeed via webhook</option>
           </select>
         </label>
       )}

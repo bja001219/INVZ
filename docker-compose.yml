@@ -11,9 +11,14 @@ services:
       DATABASE_URL: sqlite+aiosqlite:///./data/app-mock.db
       FRONTEND_ORIGIN: http://localhost:5173
       GENERATION_MAX_ATTEMPTS: "3"
+      GENERATION_CONCURRENCY: "3"
       RETRY_BASE_DELAY_SEC: "1"
       PROVIDER_POLL_INTERVAL_SEC: "1"
       GENERATION_ATTEMPT_TIMEOUT_SEC: "120"
+      # Enables the Mock webhook path; Live also needs a reachable WEBHOOK_PUBLIC_URL.
+      WEBHOOK_SECRET: local-demo-webhook-secret
+      SELF_BASE_URL: http://127.0.0.1:8000
+      MOCK_WEBHOOK_DELAY_SEC: "1"
     ports:
       - "127.0.0.1:8000:8000"
     volumes:
