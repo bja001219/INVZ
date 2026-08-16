@@ -1,5 +1,11 @@
 # Prompt-to-Animation Generator 설계 명세 — 면접 MVP 축소판
 
+> **일부 대체됨 (2026-08-16).** §3.2가 제외했던 Webhook, Batch 생성, 런타임 Mock/Live 전환은
+> 과제 원문 확인에 따라 다시 범위에 들어왔다. §2가 예고한 "원문 확인 시 별도 scope 변경" 조건이 발동한 것이다.
+> 해당 세 항목과 §7 데이터 모델, §11 API 계약은
+> [`2026-08-16-batch-character-consistency-design.md`](2026-08-16-batch-character-consistency-design.md)를 우선한다.
+> 나머지 결정(단일 프로세스, 인증 없음, 로컬 전용, nominal 30초, 자체 스토리지 없음)은 그대로 유효하다.
+
 ## 1. 목적과 설계 원칙
 
 하나의 자연어 prompt를 Scene과 정확히 6개의 5초 Cut으로 변환하고, 각 Cut의 이미지와 비디오를 생성한 뒤 선택된 6개 비디오를 순서대로 재생하는 full-stack 면접 MVP를 만든다.
