@@ -9,6 +9,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from app.batches import create_image_batch, create_video_batch
 from app.core.clock import Clock
 from app.core.config import GenerationMode, Settings, get_settings
 from app.core.db import build_engine
@@ -21,6 +22,7 @@ from app.providers.mock import MockGenerationProvider, MockSceneProvider
 from app.providers.openai_scene import OpenAISceneProvider
 from app.scenes import _job_response, create_scene, get_scene
 from app.schemas import (
+    BatchResponse,
     ConfigResponse,
     CreateGenerationRequest,
     GenerationJobResponse,
@@ -52,6 +54,7 @@ def create_app(settings: Settings, *, generation_worker: GenerationWorker | None
             retry_base_delay_sec=settings.retry_base_delay_sec,
             provider_poll_interval_sec=settings.provider_poll_interval_sec,
             generation_attempt_timeout_sec=settings.generation_attempt_timeout_sec,
+            concurrency=settings.generation_concurrency,
         )
 
     @asynccontextmanager
@@ -181,6 +184,44 @@ def create_app(settings: Settings, *, generation_worker: GenerationWorker | None
             session, cut_id, payload, max_attempts=settings.generation_max_attempts
         )
         return _job_response(job)
+
+    @application.post(
+        "/api/scenes/{scene_id}/images",
+        response_model=BatchResponse,
+        status_code=status.HTTP_202_ACCEPTED,
+    )
+    async def post_image_batch(
+        scene_id: UUID,
+        payload: CreateGenerationRequest,
+        session: Annotated[AsyncSession, Depends(get_app_session)],
+    ) -> BatchResponse:
+        validate_generation_request(payload)
+        return await create_image_batch(
+            session,
+            scene_id,
+            payload,
+            max_attempts=settings.generation_max_attempts,
+            generation_mode=settings.generation_mode.name,
+        )
+
+    @application.post(
+        "/api/scenes/{scene_id}/videos",
+        response_model=BatchResponse,
+        status_code=status.HTTP_202_ACCEPTED,
+    )
+    async def post_video_batch(
+        scene_id: UUID,
+        payload: CreateGenerationRequest,
+        session: Annotated[AsyncSession, Depends(get_app_session)],
+    ) -> BatchResponse:
+        validate_generation_request(payload)
+        return await create_video_batch(
+            session,
+            scene_id,
+            payload,
+            max_attempts=settings.generation_max_attempts,
+            generation_mode=settings.generation_mode.name,
+        )
 
     @application.put("/api/cuts/{cut_id}/selected-image", response_model=SceneResponse)
     async def put_selected_image(

@@ -105,14 +105,15 @@ class KieGenerationProvider:
 
 def _submission_body(request: GenerationRequest) -> dict[str, object]:
     if request.kind is GenerationKind.IMAGE:
-        return {
-            "model": "google/nano-banana",
-            "input": {
-                "prompt": request.prompt,
-                "aspect_ratio": "16:9",
-                "output_format": "png",
-            },
+        image_input: dict[str, object] = {
+            "prompt": request.prompt,
+            "aspect_ratio": "16:9",
+            "output_format": "png",
         }
+        # Cuts after the first send the scene anchor so the model redraws the same cast.
+        if request.reference_image_url is not None and _is_http_url(request.reference_image_url):
+            image_input["image_urls"] = [request.reference_image_url]
+        return {"model": "google/nano-banana", "input": image_input}
     if request.source_image_url is None or not _is_http_url(request.source_image_url):
         raise PermanentProviderError("KIE_REQUEST_INVALID")
     return {

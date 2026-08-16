@@ -20,7 +20,9 @@ CREATE_TASK_URL = "https://api.kie.ai/api/v1/jobs/createTask"
 TASK_DETAIL_URL = "https://api.kie.ai/api/v1/jobs/recordInfo"
 
 
-def image_request(*, prompt: str = "forest") -> GenerationRequest:
+def image_request(
+    *, prompt: str = "forest", reference_image_url: str | None = None
+) -> GenerationRequest:
     return GenerationRequest(
         job_id=uuid4(),
         kind=GenerationKind.IMAGE,
@@ -29,6 +31,7 @@ def image_request(*, prompt: str = "forest") -> GenerationRequest:
         duration_sec=5,
         mock_scenario=None,
         attempt_count=1,
+        reference_image_url=reference_image_url,
     )
 
 
@@ -83,6 +86,47 @@ async def test_kie_image_submit_contract(kie: KieGenerationProvider, respx_mock)
     }
     assert request.headers["Authorization"] == "Bearer test-kie-key"
     assert result.external_task_id == "img-1"
+
+
+async def test_kie_image_submit_sends_the_anchor_reference(
+    kie: KieGenerationProvider, respx_mock
+) -> None:
+    route = respx_mock.post(CREATE_TASK_URL).mock(
+        return_value=Response(
+            200,
+            json={"code": 200, "msg": "success", "data": {"taskId": "img-2"}},
+        )
+    )
+
+    await kie.submit(
+        image_request(prompt="forest", reference_image_url="https://cdn.example/anchor.png")
+    )
+
+    assert json.loads(route.calls.last.request.content) == {
+        "model": "google/nano-banana",
+        "input": {
+            "prompt": "forest",
+            "aspect_ratio": "16:9",
+            "output_format": "png",
+            "image_urls": ["https://cdn.example/anchor.png"],
+        },
+    }
+
+
+@pytest.mark.parametrize("reference", ["", "   ", "ftp://cdn.example/a.png", "not-a-url"])
+async def test_kie_image_submit_drops_an_unusable_reference(
+    kie: KieGenerationProvider, respx_mock, reference: str
+) -> None:
+    route = respx_mock.post(CREATE_TASK_URL).mock(
+        return_value=Response(
+            200,
+            json={"code": 200, "msg": "success", "data": {"taskId": "img-3"}},
+        )
+    )
+
+    await kie.submit(image_request(reference_image_url=reference))
+
+    assert "image_urls" not in json.loads(route.calls.last.request.content)["input"]
 
 
 async def test_kie_video_submit_contract(kie: KieGenerationProvider, respx_mock) -> None:

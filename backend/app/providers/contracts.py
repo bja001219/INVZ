@@ -34,6 +34,8 @@ class GenerationRequest:
     duration_sec: Literal[5]
     mock_scenario: MockScenario | None
     attempt_count: int
+    # The scene anchor image an IMAGE request should stay visually consistent with.
+    reference_image_url: str | None = None
 
 
 @dataclass(frozen=True)

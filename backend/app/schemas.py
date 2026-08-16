@@ -86,6 +86,23 @@ class CreateGenerationRequest(BaseModel):
     mock_scenario: str | None = Field(default=None, alias="mockScenario")
 
 
+class BatchSkip(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    cut_id: UUID = Field(serialization_alias="cutId")
+    reason: str
+
+
+class BatchResponse(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    id: UUID
+    kind: GenerationKind
+    requested_count: int = Field(serialization_alias="requestedCount")
+    created_job_ids: list[UUID] = Field(serialization_alias="createdJobIds")
+    skipped: list[BatchSkip]
+
+
 class SelectImageRequest(BaseModel):
     image_id: UUID = Field(alias="imageId")
 

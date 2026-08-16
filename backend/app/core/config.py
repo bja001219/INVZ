@@ -24,6 +24,7 @@ class Settings(BaseSettings):
     database_url: str = "sqlite+aiosqlite:///./data/app-mock.db"
     frontend_origin: str = "http://localhost:5173"
     generation_max_attempts: int = Field(default=3, ge=1, le=10)
+    generation_concurrency: int = Field(default=3, ge=1, le=16)
     retry_base_delay_sec: float = Field(default=1, gt=0)
     provider_poll_interval_sec: float = Field(default=1, gt=0)
     generation_attempt_timeout_sec: float = Field(default=120, gt=0)

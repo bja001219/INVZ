@@ -238,6 +238,8 @@ def make_worker(
     factory: async_sessionmaker[AsyncSession],
     provider: StubProvider | MockGenerationProvider,
     clock: FakeClock,
+    *,
+    concurrency: int = 1,
 ) -> GenerationWorker:
     return GenerationWorker(
         session_factory=factory,
@@ -246,7 +248,31 @@ def make_worker(
         retry_base_delay_sec=1,
         provider_poll_interval_sec=1,
         generation_attempt_timeout_sec=10,
+        concurrency=concurrency,
     )
+
+
+async def add_scene_cuts(
+    factory: async_sessionmaker[AsyncSession], *, orders: tuple[int, ...]
+) -> list[Cut]:
+    """Cuts that share one Scene, so the anchor gate applies between them."""
+    async with factory.begin() as session:
+        scene = Scene(user_prompt="prompt", title="title", scenario="scenario")
+        session.add(scene)
+        await session.flush()
+        cuts = [
+            Cut(
+                scene_id=scene.id,
+                order=order,
+                image_prompt=f"image prompt {order}",
+                video_prompt=f"video prompt {order}",
+                duration_sec=5,
+            )
+            for order in orders
+        ]
+        session.add_all(cuts)
+        await session.flush()
+        return cuts
 
 
 async def load_job(factory: async_sessionmaker[AsyncSession], job: GenerationJob) -> GenerationJob:
@@ -271,6 +297,95 @@ async def test_worker_handles_one_due_job_per_run(
     statuses = {(await load_job(worker_db, job)).status for job in (first, second)}
     assert worked is True
     assert statuses == {JobStatus.PROCESSING, JobStatus.QUEUED}
+
+
+async def test_worker_submits_up_to_the_concurrency_limit_per_run(
+    worker_db: async_sessionmaker[AsyncSession],
+) -> None:
+    cuts = [await add_cut(worker_db, order=order) for order in range(1, 7)]
+    jobs = [await add_image_job(worker_db, cut) for cut in cuts]
+    provider = StubProvider(submit_effects=[Submission(f"task-{n}") for n in range(6)])
+
+    await make_worker(worker_db, provider, FakeClock(), concurrency=3).run_once()
+
+    statuses = [(await load_job(worker_db, job)).status for job in jobs]
+    assert statuses.count(JobStatus.PROCESSING) == 3
+    assert statuses.count(JobStatus.QUEUED) == 3
+    assert len(provider.submit_requests) == 3
+
+
+async def test_worker_drains_a_batch_across_successive_runs(
+    worker_db: async_sessionmaker[AsyncSession],
+) -> None:
+    cuts = [await add_cut(worker_db, order=order) for order in range(1, 7)]
+    jobs = [await add_image_job(worker_db, cut) for cut in cuts]
+    provider = StubProvider(submit_effects=[Submission(f"task-{n}") for n in range(6)])
+    worker = make_worker(worker_db, provider, FakeClock(), concurrency=3)
+
+    await worker.run_once()
+    await worker.run_once()
+
+    statuses = [(await load_job(worker_db, job)).status for job in jobs]
+    assert statuses == [JobStatus.PROCESSING] * 6
+
+
+async def test_non_anchor_image_waits_while_the_anchor_job_is_active(
+    worker_db: async_sessionmaker[AsyncSession],
+) -> None:
+    first, second = await add_scene_cuts(worker_db, orders=(1, 2))
+    anchor_job = await add_image_job(worker_db, first)
+    follower_job = await add_image_job(worker_db, second)
+    provider = StubProvider(submit_effects=[Submission("anchor")])
+
+    await make_worker(worker_db, provider, FakeClock(), concurrency=3).run_once()
+
+    assert (await load_job(worker_db, anchor_job)).status == JobStatus.PROCESSING
+    assert (await load_job(worker_db, follower_job)).status == JobStatus.QUEUED
+    assert len(provider.submit_requests) == 1
+
+
+async def test_non_anchor_image_proceeds_unreferenced_once_no_anchor_job_is_active(
+    worker_db: async_sessionmaker[AsyncSession],
+) -> None:
+    first, second = await add_scene_cuts(worker_db, orders=(1, 2))
+    await add_image_job(worker_db, first, status=JobStatus.FAILED)
+    follower_job = await add_image_job(worker_db, second)
+    provider = StubProvider(submit_effects=[Submission("follower")])
+
+    await make_worker(worker_db, provider, FakeClock(), concurrency=3).run_once()
+
+    stored = await load_job(worker_db, follower_job)
+    assert stored.status == JobStatus.PROCESSING
+    assert stored.reference_image_id is None
+    assert provider.submit_requests[0].reference_image_url is None
+
+
+async def test_non_anchor_image_submits_with_the_anchor_reference(
+    worker_db: async_sessionmaker[AsyncSession],
+) -> None:
+    first, second = await add_scene_cuts(worker_db, orders=(1, 2))
+    anchor_image = await add_source_image(worker_db, first, selected=True)
+    follower_job = await add_image_job(worker_db, second)
+    provider = StubProvider(submit_effects=[Submission("follower")])
+
+    await make_worker(worker_db, provider, FakeClock(), concurrency=3).run_once()
+
+    stored = await load_job(worker_db, follower_job)
+    assert stored.reference_image_id == anchor_image.id
+    assert provider.submit_requests[0].reference_image_url == anchor_image.url
+
+
+async def test_anchor_cut_itself_is_never_gated_or_referenced(
+    worker_db: async_sessionmaker[AsyncSession],
+) -> None:
+    first, _ = await add_scene_cuts(worker_db, orders=(1, 2))
+    anchor_job = await add_image_job(worker_db, first)
+    provider = StubProvider(submit_effects=[Submission("anchor")])
+
+    await make_worker(worker_db, provider, FakeClock(), concurrency=3).run_once()
+
+    assert (await load_job(worker_db, anchor_job)).status == JobStatus.PROCESSING
+    assert provider.submit_requests[0].reference_image_url is None
     assert len(provider.submit_requests) == 1
 
 

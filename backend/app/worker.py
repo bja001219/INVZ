@@ -4,7 +4,7 @@ from contextlib import suppress
 from datetime import datetime, timedelta
 from uuid import UUID
 
-from sqlalchemy import or_, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.core.clock import Clock
@@ -21,6 +21,15 @@ from app.schemas import MockScenario
 
 logger = logging.getLogger(__name__)
 
+_ANCHOR_CUT_ORDER = 1
+_CANDIDATE_FLOOR = 24
+_ACTIVE_STATUSES = (
+    JobStatus.QUEUED,
+    JobStatus.SUBMITTING,
+    JobStatus.PROCESSING,
+    JobStatus.RETRY_WAIT,
+)
+
 
 class GenerationWorker:
     def __init__(
@@ -32,6 +41,7 @@ class GenerationWorker:
         retry_base_delay_sec: float,
         provider_poll_interval_sec: float,
         generation_attempt_timeout_sec: float,
+        concurrency: int = 1,
     ) -> None:
         self._session_factory = session_factory
         self._provider = provider
@@ -39,6 +49,7 @@ class GenerationWorker:
         self._retry_base_delay_sec = retry_base_delay_sec
         self._provider_poll_interval_sec = provider_poll_interval_sec
         self._generation_attempt_timeout_sec = generation_attempt_timeout_sec
+        self._concurrency = max(1, concurrency)
         self._task: asyncio.Task[None] | None = None
 
     @property
@@ -69,20 +80,26 @@ class GenerationWorker:
             await self._clock.sleep(self._provider_poll_interval_sec)
 
     async def run_once(self) -> bool:
+        """Advance the queue by one tick.
+
+        Claiming is serial inside a single transaction so two jobs can never be claimed twice;
+        only the slow provider calls fan out, bounded by the configured concurrency.
+        """
         if await self._recover_one_submitting():
             return True
-        handled_submission, request = await self._prepare_one_submission()
-        if handled_submission:
-            if request is not None:
-                await self._submit(request)
+        touched, requests = await self._claim_due_submissions(self._concurrency)
+        if touched:
+            if requests:
+                await asyncio.gather(*(self._submit(request) for request in requests))
             return True
         if await self._expire_one_attempt():
             return True
-        polling = await self._one_due_poll()
-        if polling is None:
+        polls = await self._claim_due_polls(self._concurrency)
+        if not polls:
             return False
-        job_id, external_task_id = polling
-        await self._poll(job_id, external_task_id)
+        await asyncio.gather(
+            *(self._poll(job_id, external_task_id) for job_id, external_task_id in polls)
+        )
         return True
 
     async def _recover_one_submitting(self) -> bool:
@@ -103,56 +120,118 @@ class GenerationWorker:
             )
             return True
 
-    async def _prepare_one_submission(self) -> tuple[bool, GenerationRequest | None]:
+    async def _claim_due_submissions(
+        self, limit: int
+    ) -> tuple[bool, list[GenerationRequest]]:
+        """Claim up to `limit` due jobs in one transaction.
+
+        Returns whether any row was written, which is separate from how many requests came back:
+        a job can be terminally failed here (missing source image) without producing a request,
+        and a job can be skipped without being written (waiting on the scene anchor).
+        """
         now = self._clock.now()
+        touched = False
+        requests: list[GenerationRequest] = []
         async with self._session_factory() as session, session.begin():
-            job = await session.scalar(
-                select(GenerationJob)
-                .where(
-                    GenerationJob.status.in_([JobStatus.QUEUED, JobStatus.RETRY_WAIT]),
-                    or_(GenerationJob.next_run_at.is_(None), GenerationJob.next_run_at <= now),
-                )
-                .order_by(GenerationJob.created_at, GenerationJob.id)
-                .limit(1)
-            )
-            if job is None:
-                return False, None
-            source_image_url: str | None = None
-            if job.kind is GenerationKind.VIDEO:
-                source = (
-                    await session.get(CutImage, job.source_image_id)
-                    if job.source_image_id is not None
-                    else None
-                )
-                if source is None:
-                    _terminal_failure(
-                        job,
-                        now=now,
-                        code="SOURCE_IMAGE_MISSING",
-                        message="Generation source image is unavailable",
+            candidates = list(
+                await session.scalars(
+                    select(GenerationJob)
+                    .where(
+                        GenerationJob.status.in_([JobStatus.QUEUED, JobStatus.RETRY_WAIT]),
+                        or_(
+                            GenerationJob.next_run_at.is_(None),
+                            GenerationJob.next_run_at <= now,
+                        ),
                     )
-                    return True, None
-                source_image_url = source.url
-            job.attempt_count += 1
-            job.status = JobStatus.SUBMITTING
-            job.external_task_id = None
-            job.next_run_at = None
-            job.attempt_deadline_at = None
-            job.last_error_code = None
-            job.last_error_message = None
-            scenario = MockScenario(job.mock_scenario) if job.mock_scenario is not None else None
-            return (
-                True,
-                GenerationRequest(
-                    job_id=job.id,
-                    kind=job.kind,
-                    prompt=job.prompt,
-                    source_image_url=source_image_url,
-                    duration_sec=5,
-                    mock_scenario=scenario,
-                    attempt_count=job.attempt_count,
-                ),
+                    .order_by(GenerationJob.created_at, GenerationJob.id)
+                    # Over-fetch: anchor-gated jobs are filtered out below, and a plain
+                    # LIMIT would let one gated job hide the runnable jobs behind it.
+                    .limit(max(limit * 4, _CANDIDATE_FLOOR))
+                )
             )
+            for job in candidates:
+                if len(requests) >= limit:
+                    break
+                source_image_url: str | None = None
+                reference_image_url: str | None = None
+                if job.kind is GenerationKind.VIDEO:
+                    source = (
+                        await session.get(CutImage, job.source_image_id)
+                        if job.source_image_id is not None
+                        else None
+                    )
+                    if source is None:
+                        _terminal_failure(
+                            job,
+                            now=now,
+                            code="SOURCE_IMAGE_MISSING",
+                            message="Generation source image is unavailable",
+                        )
+                        touched = True
+                        continue
+                    source_image_url = source.url
+                else:
+                    ready, reference = await self._resolve_anchor_reference(session, job)
+                    if not ready:
+                        continue
+                    if reference is not None:
+                        job.reference_image_id, reference_image_url = reference
+                job.attempt_count += 1
+                job.status = JobStatus.SUBMITTING
+                job.external_task_id = None
+                job.next_run_at = None
+                job.attempt_deadline_at = None
+                job.last_error_code = None
+                job.last_error_message = None
+                touched = True
+                scenario = (
+                    MockScenario(job.mock_scenario) if job.mock_scenario is not None else None
+                )
+                requests.append(
+                    GenerationRequest(
+                        job_id=job.id,
+                        kind=job.kind,
+                        prompt=job.prompt,
+                        source_image_url=source_image_url,
+                        duration_sec=5,
+                        mock_scenario=scenario,
+                        attempt_count=job.attempt_count,
+                        reference_image_url=reference_image_url,
+                    )
+                )
+        return touched, requests
+
+    async def _resolve_anchor_reference(
+        self, session: AsyncSession, job: GenerationJob
+    ) -> tuple[bool, tuple[UUID, str] | None]:
+        """Decide whether an IMAGE job may run now, and which anchor image it should reference.
+
+        Cuts after the first stay consistent by referencing the scene's anchor: the selected
+        image of Cut 1. They wait only while an anchor image job is still active, so a
+        permanently failed Cut 1 opens the gate instead of stalling the scene forever.
+        """
+        cut = await session.get(Cut, job.cut_id)
+        if cut is None or cut.order == _ANCHOR_CUT_ORDER:
+            return True, None
+        anchor_cut = await session.scalar(
+            select(Cut).where(Cut.scene_id == cut.scene_id, Cut.order == _ANCHOR_CUT_ORDER)
+        )
+        if anchor_cut is None:
+            return True, None
+        if anchor_cut.selected_image_id is not None:
+            anchor_image = await session.get(CutImage, anchor_cut.selected_image_id)
+            if anchor_image is not None:
+                return True, (anchor_image.id, anchor_image.url)
+        pending_anchor = await session.scalar(
+            select(func.count(GenerationJob.id)).where(
+                GenerationJob.cut_id == anchor_cut.id,
+                GenerationJob.kind == GenerationKind.IMAGE,
+                GenerationJob.status.in_(_ACTIVE_STATUSES),
+            )
+        )
+        if pending_anchor:
+            return False, None
+        return True, None
 
     async def _submit(self, request: GenerationRequest) -> None:
         try:
@@ -212,22 +291,25 @@ class GenerationWorker:
             )
             return True
 
-    async def _one_due_poll(self) -> tuple[UUID, str] | None:
+    async def _claim_due_polls(self, limit: int) -> list[tuple[UUID, str]]:
         now = self._clock.now()
         async with self._session_factory() as session:
-            job = await session.scalar(
-                select(GenerationJob)
-                .where(
-                    GenerationJob.status == JobStatus.PROCESSING,
-                    GenerationJob.external_task_id.is_not(None),
-                    or_(GenerationJob.next_run_at.is_(None), GenerationJob.next_run_at <= now),
+            jobs = list(
+                await session.scalars(
+                    select(GenerationJob)
+                    .where(
+                        GenerationJob.status == JobStatus.PROCESSING,
+                        GenerationJob.external_task_id.is_not(None),
+                        or_(
+                            GenerationJob.next_run_at.is_(None),
+                            GenerationJob.next_run_at <= now,
+                        ),
+                    )
+                    .order_by(GenerationJob.next_run_at, GenerationJob.created_at)
+                    .limit(limit)
                 )
-                .order_by(GenerationJob.next_run_at, GenerationJob.created_at)
-                .limit(1)
             )
-            if job is None or job.external_task_id is None:
-                return None
-            return job.id, job.external_task_id
+        return [(job.id, job.external_task_id) for job in jobs if job.external_task_id]
 
     async def _poll(self, job_id: UUID, external_task_id: str) -> None:
         try:
