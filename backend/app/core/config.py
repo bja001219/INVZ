@@ -28,6 +28,10 @@ class Settings(BaseSettings):
     retry_base_delay_sec: float = Field(default=1, gt=0)
     provider_poll_interval_sec: float = Field(default=1, gt=0)
     generation_attempt_timeout_sec: float = Field(default=120, gt=0)
+    webhook_secret: SecretStr = SecretStr("")
+    webhook_public_url: str = ""
+    self_base_url: str = "http://127.0.0.1:8000"
+    mock_webhook_delay_sec: float = Field(default=1, ge=0)
 
     @model_validator(mode="after")
     def live_requires_keys(self) -> "Settings":

@@ -80,6 +80,7 @@ class MockScenario(StrEnum):
     SUCCESS = "SUCCESS"
     FAIL_TWICE_THEN_SUCCEED = "FAIL_TWICE_THEN_SUCCEED"
     ALWAYS_FAIL = "ALWAYS_FAIL"
+    SUCCEED_VIA_WEBHOOK = "SUCCEED_VIA_WEBHOOK"
 
 
 def normalize_mock_scenario(raw_scenario: str | None) -> MockScenario | None:
@@ -92,6 +93,10 @@ class CreateGenerationRequest(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
     mock_scenario: str | None = Field(default=None, alias="mockScenario")
+
+
+class WebhookAck(BaseModel):
+    status: Literal["applied", "ignored"]
 
 
 class BatchSkip(BaseModel):

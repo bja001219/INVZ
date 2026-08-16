@@ -20,8 +20,15 @@ _TASK_DETAIL_URL = "https://api.kie.ai/api/v1/jobs/recordInfo"
 
 
 class KieGenerationProvider:
-    def __init__(self, *, api_key: str, client: httpx.AsyncClient | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        api_key: str,
+        client: httpx.AsyncClient | None = None,
+        callback_url: str | None = None,
+    ) -> None:
         self._authorization = f"Bearer {api_key}"
+        self._callback_url = callback_url
         self._owns_client = client is None
         self._client = client or httpx.AsyncClient(
             timeout=httpx.Timeout(30.0, connect=5.0, read=30.0, write=30.0)
@@ -36,6 +43,9 @@ class KieGenerationProvider:
 
     async def submit(self, request: GenerationRequest) -> Submission:
         body = _submission_body(request)
+        if self._callback_url is not None:
+            # Webhook is an accelerator, not a replacement: polling still closes every task.
+            body["callBackUrl"] = self._callback_url
         try:
             response = await self._client.post(
                 _CREATE_TASK_URL,
@@ -69,38 +79,46 @@ class KieGenerationProvider:
 
         _raise_for_http_status(response, operation="poll")
         payload = _response_payload(response)
-        data = _successful_data(payload)
-        state = data.get("state")
-        if not isinstance(state, str):
-            raise PermanentProviderError("KIE_RESPONSE_INVALID")
-        if state in {"waiting", "queuing", "generating"}:
-            return TaskResult(state="PENDING")
-        if state == "fail":
-            return TaskResult(
-                state="FAILED",
-                error_code="KIE_TASK_FAILED",
-                error_message="Generation provider failed",
-                retryable=data.get("retryable") is True,
-            )
-        if state != "success":
-            raise PermanentProviderError("KIE_RESPONSE_INVALID")
+        return task_result_from_data(_successful_data(payload))
 
-        result_json = data.get("resultJson")
-        if not isinstance(result_json, str):
-            raise PermanentProviderError("KIE_RESPONSE_INVALID")
-        try:
-            parsed_result = json.loads(result_json)
-        except (json.JSONDecodeError, TypeError, ValueError):
-            raise PermanentProviderError("KIE_RESPONSE_INVALID") from None
-        if not isinstance(parsed_result, dict):
-            raise PermanentProviderError("KIE_RESPONSE_INVALID")
-        result_urls = parsed_result.get("resultUrls")
-        if not isinstance(result_urls, list) or not result_urls:
-            raise PermanentProviderError("KIE_RESPONSE_INVALID")
-        result_url = result_urls[0]
-        if not _is_http_url(result_url):
-            raise PermanentProviderError("KIE_RESPONSE_INVALID")
-        return TaskResult(state="SUCCEEDED", result_url=result_url.strip())
+
+def task_result_from_data(data: dict[str, Any]) -> TaskResult:
+    """Normalize one Kie task record.
+
+    Polling and the webhook route both call this, so a callback and a poll of the same task
+    always produce the same TaskResult and drive the same state transition.
+    """
+    state = data.get("state")
+    if not isinstance(state, str):
+        raise PermanentProviderError("KIE_RESPONSE_INVALID")
+    if state in {"waiting", "queuing", "generating"}:
+        return TaskResult(state="PENDING")
+    if state == "fail":
+        return TaskResult(
+            state="FAILED",
+            error_code="KIE_TASK_FAILED",
+            error_message="Generation provider failed",
+            retryable=data.get("retryable") is True,
+        )
+    if state != "success":
+        raise PermanentProviderError("KIE_RESPONSE_INVALID")
+
+    result_json = data.get("resultJson")
+    if not isinstance(result_json, str):
+        raise PermanentProviderError("KIE_RESPONSE_INVALID")
+    try:
+        parsed_result = json.loads(result_json)
+    except (json.JSONDecodeError, TypeError, ValueError):
+        raise PermanentProviderError("KIE_RESPONSE_INVALID") from None
+    if not isinstance(parsed_result, dict):
+        raise PermanentProviderError("KIE_RESPONSE_INVALID")
+    result_urls = parsed_result.get("resultUrls")
+    if not isinstance(result_urls, list) or not result_urls:
+        raise PermanentProviderError("KIE_RESPONSE_INVALID")
+    result_url = result_urls[0]
+    if not _is_http_url(result_url):
+        raise PermanentProviderError("KIE_RESPONSE_INVALID")
+    return TaskResult(state="SUCCEEDED", result_url=result_url.strip())
 
 
 def _submission_body(request: GenerationRequest) -> dict[str, object]:

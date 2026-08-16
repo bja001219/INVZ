@@ -345,9 +345,14 @@ class GenerationWorker:
                 message="Generation provider failed",
             )
         else:
-            await self._apply_poll_result(job_id, result)
+            await self.apply_external_result(job_id, result)
 
-    async def _apply_poll_result(self, job_id: UUID, result: TaskResult) -> None:
+    async def apply_external_result(self, job_id: UUID, result: TaskResult) -> None:
+        """Apply one provider outcome, whichever transport delivered it.
+
+        Every branch re-reads the job inside its transaction and bails unless it is still
+        PROCESSING, so a webhook and a poll arriving together cannot both complete the job.
+        """
         if result.state == "PENDING":
             async with self._session_factory() as session, session.begin():
                 job = await session.get(GenerationJob, job_id)

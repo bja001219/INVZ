@@ -1,10 +1,14 @@
+import asyncio
+import json
+import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Any
 from uuid import UUID
 
-from fastapi import Depends, FastAPI, status
+import httpx
+from fastapi import Depends, FastAPI, Header, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -16,8 +20,13 @@ from app.core.db import build_engine
 from app.core.errors import AppError, register_error_handlers
 from app.core.logging import configure_secret_redaction
 from app.generations import create_image_job, create_video_job, select_image, select_video
+from app.models import GenerationKind
 from app.providers.kie import KieGenerationProvider
-from app.providers.mock import MockGenerationProvider, MockSceneProvider
+from app.providers.mock import (
+    MockGenerationProvider,
+    MockSceneProvider,
+    mock_result_url,
+)
 from app.providers.openai_scene import OpenAISceneProvider
 from app.runtime import ProviderRegistry, RuntimeMode
 from app.scenes import _job_response, create_scene, get_scene
@@ -31,13 +40,18 @@ from app.schemas import (
     SelectImageRequest,
     SelectVideoRequest,
     UpdateConfigRequest,
+    WebhookAck,
     normalize_mock_scenario,
 )
+from app.webhooks import apply_webhook, verify_webhook_secret
 from app.worker import GenerationWorker
+
+logger = logging.getLogger(__name__)
 
 
 def create_app(settings: Settings, *, generation_worker: GenerationWorker | None = None) -> FastAPI:
     engine = build_engine(settings.database_url)
+    background_tasks: set[asyncio.Task[None]] = set()
     session_factory = async_sessionmaker(engine, expire_on_commit=False)
 
     # Both provider pairs are constructed up front so the mode can flip without a restart.
@@ -51,9 +65,49 @@ def create_app(settings: Settings, *, generation_worker: GenerationWorker | None
         live_scene = OpenAISceneProvider(api_key=settings.openai_api_key.get_secret_value())
         live_generation = KieGenerationProvider(api_key=settings.kie_api_key.get_secret_value())
 
+    webhook_secret = settings.webhook_secret.get_secret_value()
+
+    async def deliver_mock_webhook(task_id: str, kind: GenerationKind) -> None:
+        """Post a provider-shaped callback to our own endpoint after a short delay."""
+        if not webhook_secret:
+            return
+
+        base_url = settings.self_base_url.rstrip("/")
+
+        async def send() -> None:
+            await asyncio.sleep(settings.mock_webhook_delay_sec)
+            # Absolute, because a real provider callback carries an absolute URL and the
+            # shared normalizer rejects anything that is not http(s).
+            result_url = f"{base_url}{mock_result_url(kind)}"
+            payload = {
+                "data": {
+                    "taskId": task_id,
+                    "state": "success",
+                    "resultJson": json.dumps({"resultUrls": [result_url]}),
+                }
+            }
+            try:
+                async with httpx.AsyncClient(timeout=10.0) as callback_client:
+                    await callback_client.post(
+                        f"{base_url}/api/webhooks/kie",
+                        headers={"X-Webhook-Secret": webhook_secret},
+                        json=payload,
+                    )
+            except httpx.HTTPError:
+                # Polling remains the backstop, so a lost callback only costs latency.
+                logger.warning("Mock webhook delivery failed")
+
+        background_tasks.add(asyncio.create_task(send()))
+
+    if live_generation is not None and settings.webhook_public_url:
+        live_generation = KieGenerationProvider(
+            api_key=settings.kie_api_key.get_secret_value(),
+            callback_url=settings.webhook_public_url,
+        )
+
     registry = ProviderRegistry(
         mock_scene=MockSceneProvider(),
-        mock_generation=MockGenerationProvider(),
+        mock_generation=MockGenerationProvider(webhook_sender=deliver_mock_webhook),
         live_scene=live_scene,
         live_generation=live_generation,
     )
@@ -78,6 +132,8 @@ def create_app(settings: Settings, *, generation_worker: GenerationWorker | None
             yield
         finally:
             await generation_worker.stop()
+            for pending in list(background_tasks):
+                pending.cancel()
             if live_generation is not None:
                 await live_generation.aclose()
             await engine.dispose()
@@ -212,6 +268,15 @@ def create_app(settings: Settings, *, generation_worker: GenerationWorker | None
             generation_mode=runtime_mode.name,
         )
         return _job_response(job)
+
+    @application.post("/api/webhooks/kie", response_model=WebhookAck)
+    async def receive_kie_webhook(
+        payload: dict[str, Any],
+        session: Annotated[AsyncSession, Depends(get_app_session)],
+        x_webhook_secret: Annotated[str | None, Header()] = None,
+    ) -> WebhookAck:
+        verify_webhook_secret(webhook_secret, x_webhook_secret)
+        return await apply_webhook(session, generation_worker, payload)
 
     @application.post(
         "/api/scenes/{scene_id}/images",
