@@ -14,6 +14,52 @@ from app.main import create_app
 from app.models import Base
 
 
+def build_scene_payload() -> dict[str, object]:
+    """A SceneDraft payload in provider wire format, shared by scene and provider tests."""
+    return {
+        "title": "Moon Voyage",
+        "scenario": "A small crew travels to the moon.",
+        "characterProfiles": [
+            {
+                "name": "Mina",
+                "role": "female lead high-school student",
+                "ageRange": "17",
+                "hairColor": "dark brown",
+                "hairStyle": "long straight",
+                "outfit": "navy sailor uniform with a red ribbon",
+                "build": "slim",
+                "faceImpression": "soft calm expression",
+                "signatureProp": "a stack of library books",
+            },
+            {
+                "name": "Jun",
+                "role": "male lead high-school student",
+                "ageRange": "17",
+                "hairColor": "black",
+                "hairStyle": "short messy",
+                "outfit": "grey blazer uniform",
+                "build": "tall lean",
+                "faceImpression": "bright open smile",
+                "signatureProp": "a worn canvas backpack",
+            },
+        ],
+        "cuts": [
+            {
+                "order": order,
+                "shotDescription": f"Moon shot {order}, wide framing of the two leads",
+                "videoMotion": f"gentle camera drift {order}",
+                "durationSec": 5,
+            }
+            for order in range(1, 7)
+        ],
+    }
+
+
+@pytest.fixture
+def valid_scene_payload() -> dict[str, object]:
+    return build_scene_payload()
+
+
 @pytest.fixture
 def settings_factory(tmp_path: Path) -> Callable[..., Settings]:
     def factory(**overrides: object) -> Settings:

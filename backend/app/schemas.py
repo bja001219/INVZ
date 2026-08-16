@@ -14,12 +14,28 @@ class ConfigResponse(BaseModel):
     generation_mode: str = Field(serialization_alias="generationMode")
 
 
+class CharacterProfile(BaseModel):
+    """A recurring character, described on fixed axes so prompt composition stays deterministic."""
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    name: str = Field(min_length=1)
+    role: str = Field(min_length=1)
+    age_range: str = Field(alias="ageRange", min_length=1)
+    hair_color: str = Field(alias="hairColor", min_length=1)
+    hair_style: str = Field(alias="hairStyle", min_length=1)
+    outfit: str = Field(min_length=1)
+    build: str = Field(min_length=1)
+    face_impression: str = Field(alias="faceImpression", min_length=1)
+    signature_prop: str = Field(alias="signatureProp", min_length=1)
+
+
 class CutDraft(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
     order: int = Field(ge=1, le=6)
-    image_prompt: str = Field(alias="imagePrompt", min_length=1)
-    video_prompt: str = Field(alias="videoPrompt", min_length=1)
+    shot_description: str = Field(alias="shotDescription", min_length=1)
+    video_motion: str = Field(alias="videoMotion", min_length=1)
     duration_sec: Literal[5] = Field(alias="durationSec")
 
 
@@ -28,6 +44,10 @@ class SceneDraft(BaseModel):
 
     title: str = Field(min_length=1)
     scenario: str = Field(min_length=1)
+    character_profiles: Annotated[
+        list[CharacterProfile],
+        Field(alias="characterProfiles", min_length=2, max_length=4),
+    ]
     cuts: Annotated[list[CutDraft], Field(min_length=6, max_length=6)]
 
     @model_validator(mode="after")
@@ -117,6 +137,8 @@ class CutResponse(BaseModel):
 
     id: UUID
     order: int
+    shot_description: str = Field(serialization_alias="shotDescription")
+    video_motion: str = Field(serialization_alias="videoMotion")
     image_prompt: str = Field(serialization_alias="imagePrompt")
     video_prompt: str = Field(serialization_alias="videoPrompt")
     duration_sec: Literal[5] = Field(serialization_alias="durationSec")
@@ -139,4 +161,7 @@ class SceneResponse(BaseModel):
     user_prompt: str = Field(serialization_alias="userPrompt")
     title: str
     scenario: str
+    character_profiles: list[CharacterProfile] = Field(
+        default_factory=list, serialization_alias="characterProfiles"
+    )
     cuts: list[CutResponse]

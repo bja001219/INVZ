@@ -6,24 +6,14 @@ import pytest
 from httpx import Response
 from openai import APIConnectionError, APITimeoutError
 
+from app.prompting import SCENE_SYSTEM_INSTRUCTION
 from app.providers.contracts import PermanentProviderError, RetryableProviderError
 from app.providers.openai_scene import OpenAISceneProvider
+from tests.conftest import build_scene_payload
 
 
 def valid_scene_payload() -> dict[str, object]:
-    return {
-        "title": "Moon Voyage",
-        "scenario": "A small crew travels to the moon.",
-        "cuts": [
-            {
-                "order": order,
-                "imagePrompt": f"Moon image {order}",
-                "videoPrompt": f"Moon video {order}",
-                "durationSec": 5,
-            }
-            for order in range(1, 7)
-        ],
-    }
+    return build_scene_payload()
 
 
 def openai_scene_response(payload: dict[str, object]) -> dict[str, object]:
@@ -98,8 +88,10 @@ async def test_openai_scene_request_uses_model_prompt_and_strict_schema(
     request = json.loads(route.calls.last.request.content)
     assert request["model"] == "gpt-5.4-mini"
     assert "moon voyage" in json.dumps(request["input"])
+    assert request["input"][0]["content"] == SCENE_SYSTEM_INSTRUCTION
     assert request["text"]["format"]["strict"] is True
     assert len(draft.cuts) == 6
+    assert len(draft.character_profiles) == 2
 
 
 @pytest.mark.parametrize("status", [429, 500, 503])

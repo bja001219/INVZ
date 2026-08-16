@@ -6,26 +6,10 @@ from sqlalchemy import func, select
 from app.core.errors import AppError
 from app.main import create_app
 from app.models import Base, Scene
+from app.prompting import NEGATIVE_STYLE_GUIDE, VISUAL_STYLE_GUIDE, character_sheet
 from app.providers.contracts import RetryableProviderError, SceneProvider
 from app.scenes import create_scene
-from app.schemas import SceneCreateRequest, SceneDraft
-
-
-@pytest.fixture
-def valid_scene_payload() -> dict[str, object]:
-    return {
-        "title": "Moon Voyage",
-        "scenario": "A small crew travels to the moon.",
-        "cuts": [
-            {
-                "order": order,
-                "imagePrompt": f"Moon image {order}",
-                "videoPrompt": f"Moon video {order}",
-                "durationSec": 5,
-            }
-            for order in range(1, 7)
-        ],
-    }
+from app.schemas import CharacterProfile, SceneCreateRequest, SceneDraft
 
 
 def test_scene_draft_requires_ordered_six_five_second_cuts(
@@ -37,6 +21,53 @@ def test_scene_draft_requires_ordered_six_five_second_cuts(
 
     with pytest.raises(ValidationError):
         SceneDraft.model_validate(valid_scene_payload)
+
+
+def test_scene_draft_requires_at_least_two_recurring_characters(
+    valid_scene_payload: dict[str, object],
+) -> None:
+    profiles = valid_scene_payload["characterProfiles"]
+    assert isinstance(profiles, list)
+    valid_scene_payload["characterProfiles"] = profiles[:1]
+
+    with pytest.raises(ValidationError):
+        SceneDraft.model_validate(valid_scene_payload)
+
+
+def test_scene_draft_rejects_a_character_missing_an_identity_field(
+    valid_scene_payload: dict[str, object],
+) -> None:
+    profiles = valid_scene_payload["characterProfiles"]
+    assert isinstance(profiles, list)
+    del profiles[0]["hairColor"]
+
+    with pytest.raises(ValidationError):
+        SceneDraft.model_validate(valid_scene_payload)
+
+
+async def test_scene_api_stores_characters_and_composes_every_cut_prompt(client) -> None:
+    body = (await client.post("/api/scenes", json={"prompt": "moon voyage"})).json()
+
+    profiles = body["characterProfiles"]
+    assert len(profiles) >= 2
+    sheet = character_sheet([CharacterProfile.model_validate(p) for p in profiles])
+    for cut in body["cuts"]:
+        assert cut["shotDescription"]
+        assert cut["videoMotion"]
+        for prompt in (cut["imagePrompt"], cut["videoPrompt"]):
+            assert VISUAL_STYLE_GUIDE in prompt
+            assert sheet in prompt
+            assert NEGATIVE_STYLE_GUIDE in prompt
+        assert cut["shotDescription"] in cut["imagePrompt"]
+        assert cut["videoMotion"] in cut["videoPrompt"]
+
+
+async def test_all_six_cuts_share_one_identical_character_section(client) -> None:
+    body = (await client.post("/api/scenes", json={"prompt": "moon voyage"})).json()
+
+    sections = {cut["imagePrompt"].split("Shot:")[0] for cut in body["cuts"]}
+
+    assert len(sections) == 1
 
 
 class InvalidProvider(SceneProvider):

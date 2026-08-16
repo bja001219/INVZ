@@ -8,6 +8,7 @@ from openai import (
 )
 from pydantic import ValidationError
 
+from app.prompting import SCENE_SYSTEM_INSTRUCTION
 from app.providers.contracts import PermanentProviderError, RetryableProviderError
 from app.schemas import SceneDraft
 
@@ -31,7 +32,10 @@ class OpenAISceneProvider:
         try:
             response = await self._client.responses.parse(
                 model=self._model,
-                input=[{"role": "user", "content": prompt}],
+                input=[
+                    {"role": "system", "content": SCENE_SYSTEM_INSTRUCTION},
+                    {"role": "user", "content": prompt},
+                ],
                 text_format=SceneDraft,
             )
             draft = response.output_parsed

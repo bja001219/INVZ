@@ -4,6 +4,7 @@ from typing import Annotated
 from uuid import UUID, uuid4
 
 from sqlalchemy import (
+    JSON,
     CheckConstraint,
     DateTime,
     Enum,
@@ -51,6 +52,8 @@ class Scene(Base):
     user_prompt: Mapped[str] = mapped_column(Text)
     title: Mapped[str] = mapped_column(String(200))
     scenario: Mapped[str] = mapped_column(Text)
+    # Serialized CharacterProfile list in camelCase; the anchor for cross-cut consistency.
+    character_profiles: Mapped[list[dict[str, str]]] = mapped_column(JSON, default=list)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.current_timestamp()
     )
@@ -69,6 +72,11 @@ class Cut(Base):
         Uuid(as_uuid=True), ForeignKey("scenes.id", ondelete="CASCADE"), index=True
     )
     order: Mapped[int] = mapped_column(Integer)
+    # What happens in this shot, kept separate from the scene-wide character sheet.
+    shot_description: Mapped[str] = mapped_column(Text, default="")
+    video_motion: Mapped[str] = mapped_column(Text, default="")
+    # Final composed prompts: style guide + character sheet + shot. Stored so a regenerate
+    # reuses the exact string that produced the earlier version.
     image_prompt: Mapped[str] = mapped_column(Text)
     video_prompt: Mapped[str] = mapped_column(Text)
     duration_sec: Mapped[int] = mapped_column(Integer, default=5)

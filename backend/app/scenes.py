@@ -8,8 +8,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.clock import Clock
 from app.core.errors import AppError
 from app.models import Cut, CutImage, CutVideo, GenerationJob, GenerationKind, Scene
+from app.prompting import compose_image_prompt, compose_video_prompt
 from app.providers.contracts import PermanentProviderError, RetryableProviderError, SceneProvider
 from app.schemas import (
+    CharacterProfile,
     CutImageResponse,
     CutResponse,
     CutVideoResponse,
@@ -36,16 +38,26 @@ async def create_scene(
         clock=clock or Clock(),
     )
 
+    profiles = draft.character_profiles
     async with session.begin():
-        scene = Scene(user_prompt=prompt, title=draft.title, scenario=draft.scenario)
+        scene = Scene(
+            user_prompt=prompt,
+            title=draft.title,
+            scenario=draft.scenario,
+            character_profiles=[profile.model_dump(by_alias=True) for profile in profiles],
+        )
         session.add(scene)
         await session.flush()
         cuts = [
             Cut(
                 scene_id=scene.id,
                 order=cut.order,
-                image_prompt=cut.image_prompt,
-                video_prompt=cut.video_prompt,
+                shot_description=cut.shot_description,
+                video_motion=cut.video_motion,
+                image_prompt=compose_image_prompt(profiles, cut.shot_description),
+                video_prompt=compose_video_prompt(
+                    profiles, cut.shot_description, cut.video_motion
+                ),
                 duration_sec=cut.duration_sec,
             )
             for cut in draft.cuts
@@ -147,6 +159,9 @@ def _scene_response(
         user_prompt=scene.user_prompt,
         title=scene.title,
         scenario=scene.scenario,
+        character_profiles=[
+            CharacterProfile.model_validate(profile) for profile in scene.character_profiles or []
+        ],
         cuts=[
             _cut_response(
                 cut,
@@ -171,6 +186,8 @@ def _cut_response(
     return CutResponse(
         id=cut.id,
         order=cut.order,
+        shot_description=cut.shot_description,
+        video_motion=cut.video_motion,
         image_prompt=cut.image_prompt,
         video_prompt=cut.video_prompt,
         duration_sec=cut.duration_sec,

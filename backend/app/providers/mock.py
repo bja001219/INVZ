@@ -6,20 +6,65 @@ from app.providers.contracts import (
     Submission,
     TaskResult,
 )
-from app.schemas import CutDraft, MockScenario, SceneDraft
+from app.schemas import CharacterProfile, CutDraft, MockScenario, SceneDraft
+
+_MOCK_CHARACTERS = (
+    CharacterProfile(
+        name="Mina",
+        role="female lead high-school student",
+        age_range="17",
+        hair_color="dark brown",
+        hair_style="long straight with a short fringe",
+        outfit="navy sailor uniform with a red ribbon",
+        build="slim",
+        face_impression="soft calm expression with round eyes",
+        signature_prop="a stack of library books",
+    ),
+    CharacterProfile(
+        name="Jun",
+        role="male lead high-school student",
+        age_range="17",
+        hair_color="black",
+        hair_style="short messy",
+        outfit="grey blazer uniform with a loosened tie",
+        build="tall and lean",
+        face_impression="bright open smile",
+        signature_prop="a worn canvas backpack",
+    ),
+)
+
+_MOCK_SHOTS = (
+    "wide establishing shot of the school gate at golden hour as the two leads notice each other",
+    "medium two-shot in the corridor while they walk side by side",
+    "close-up on the female lead glancing up from her books",
+    "over-the-shoulder shot of the male lead offering a folded note",
+    "wide shot of the empty classroom as they sit by the window",
+    "final wide shot on the rooftop with the city behind them",
+)
+
+_MOCK_MOTIONS = (
+    "slow push in",
+    "steady tracking alongside the characters",
+    "gentle rack focus",
+    "slight handheld drift",
+    "slow dolly out",
+    "static hold with drifting clouds",
+)
 
 
 class MockSceneProvider:
+    """Deterministic scene drafts so Mock mode exercises the same composition path as Live."""
+
     async def generate(self, prompt: str) -> SceneDraft:
-        title = prompt.strip().title()
         return SceneDraft(
-            title=title,
+            title=prompt.strip().title(),
             scenario=f"A six-shot animation based on {prompt.strip()}.",
+            character_profiles=list(_MOCK_CHARACTERS),
             cuts=[
                 CutDraft(
                     order=order,
-                    image_prompt=f"{prompt.strip()}, shot {order}, cinematic still",
-                    video_prompt=f"{prompt.strip()}, shot {order}, gentle camera movement",
+                    shot_description=_MOCK_SHOTS[order - 1],
+                    video_motion=_MOCK_MOTIONS[order - 1],
                     duration_sec=5,
                 )
                 for order in range(1, 7)
