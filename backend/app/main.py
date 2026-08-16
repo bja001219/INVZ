@@ -63,7 +63,12 @@ def create_app(settings: Settings, *, generation_worker: GenerationWorker | None
         settings.kie_api_key.get_secret_value().strip()
     ):
         live_scene = OpenAISceneProvider(api_key=settings.openai_api_key.get_secret_value())
-        live_generation = KieGenerationProvider(api_key=settings.kie_api_key.get_secret_value())
+        live_generation = KieGenerationProvider(
+            api_key=settings.kie_api_key.get_secret_value(),
+            # Built once, with the callback already wired: rebuilding it later would strand
+            # the first provider's HTTP client with nothing to close it.
+            callback_url=settings.webhook_public_url or None,
+        )
 
     webhook_secret = settings.webhook_secret.get_secret_value()
 
@@ -97,13 +102,9 @@ def create_app(settings: Settings, *, generation_worker: GenerationWorker | None
                 # Polling remains the backstop, so a lost callback only costs latency.
                 logger.warning("Mock webhook delivery failed")
 
-        background_tasks.add(asyncio.create_task(send()))
-
-    if live_generation is not None and settings.webhook_public_url:
-        live_generation = KieGenerationProvider(
-            api_key=settings.kie_api_key.get_secret_value(),
-            callback_url=settings.webhook_public_url,
-        )
+        delivery = asyncio.create_task(send())
+        background_tasks.add(delivery)
+        delivery.add_done_callback(background_tasks.discard)
 
     registry = ProviderRegistry(
         mock_scene=MockSceneProvider(),

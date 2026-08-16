@@ -11,6 +11,7 @@ from typing import Any
 from uuid import UUID
 
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.errors import AppError
@@ -81,7 +82,13 @@ async def apply_webhook(
 
     if result.state == "PENDING":
         return _IGNORED
-    await worker.apply_external_result(job_id, result)
+    try:
+        await worker.apply_external_result(job_id, result)
+    except IntegrityError:
+        # A poll of the same task committed first. Both transactions read PROCESSING before
+        # either took the write lock, and the unique artifact index rejected the loser. The
+        # job is already complete, so this delivery has nothing left to do.
+        return _IGNORED
     return WebhookAck(status="applied")
 
 

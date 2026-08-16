@@ -1,3 +1,4 @@
+import asyncio
 import json
 from collections.abc import AsyncIterator, Callable
 from typing import Any
@@ -166,6 +167,30 @@ async def test_polling_after_a_webhook_does_not_double_apply(webhook_app) -> Non
     )
     await application.state.generation_worker.run_once()
 
+    assert (await reload_job(factory, job.id)).status == JobStatus.SUCCEEDED
+    assert await image_count(factory, job.cut_id) == 1
+
+
+async def test_concurrent_webhook_and_poll_never_500_or_double_apply(webhook_app) -> None:
+    """Both transports can read PROCESSING before either takes the write lock.
+
+    The unique artifact index rejects the loser; the webhook must absorb that rather than
+    surface a 500 to the provider, which would trigger an endless redelivery loop.
+    """
+    client, factory, application = webhook_app
+    job = await seed_processing_job(factory, task_id="mock:IMAGE:race:1")
+
+    webhook_call = client.post(
+        "/api/webhooks/kie",
+        json=success_payload("mock:IMAGE:race:1"),
+        headers={"X-Webhook-Secret": WEBHOOK_SECRET},
+    )
+    response, _ = await asyncio.gather(
+        webhook_call, application.state.generation_worker.run_once()
+    )
+
+    assert response.status_code == 200
+    assert response.json()["status"] in {"applied", "ignored"}
     assert (await reload_job(factory, job.id)).status == JobStatus.SUCCEEDED
     assert await image_count(factory, job.cut_id) == 1
 
