@@ -113,7 +113,13 @@ async def _create_job(
             source_image_id: UUID | None = None
             prompt = cut.image_prompt
             if kind is GenerationKind.VIDEO:
-                source_image = await _selected_successful_image(session, cut)
+                source_image, source_mode = await _selected_successful_image(session, cut)
+                if source_mode != generation_mode:
+                    raise AppError(
+                        status_code=409,
+                        code="ARTIFACT_MODE_MISMATCH",
+                        message="The selected image was generated in a different mode",
+                    )
                 source_image_id = source_image.id
                 prompt = cut.video_prompt
             version = await session.scalar(
@@ -172,28 +178,37 @@ async def _cut_or_error(session: AsyncSession, cut_id: UUID) -> Cut:
     return cut
 
 
-async def _selected_successful_image(session: AsyncSession, cut: Cut) -> CutImage:
+async def _selected_successful_image(session: AsyncSession, cut: Cut) -> tuple[CutImage, str]:
+    """The selected image and the mode that produced it.
+
+    The mode travels with the image because an artifact is only usable by the provider that
+    made it: a Mock image is a path this app serves, and a Live image is a URL on the
+    provider's CDN. Handing one to the other fails, and the caller has to say why.
+    """
     if cut.selected_image_id is None:
         raise AppError(
             status_code=409,
             code="SELECTED_IMAGE_REQUIRED",
             message="A successful selected image is required",
         )
-    image = await session.scalar(
-        select(CutImage)
-        .join(GenerationJob, CutImage.generation_job_id == GenerationJob.id)
-        .where(
-            CutImage.id == cut.selected_image_id,
-            CutImage.cut_id == cut.id,
-            GenerationJob.cut_id == cut.id,
-            GenerationJob.kind == GenerationKind.IMAGE,
-            GenerationJob.status == JobStatus.SUCCEEDED,
+    row = (
+        await session.execute(
+            select(CutImage, GenerationJob.generation_mode)
+            .join(GenerationJob, CutImage.generation_job_id == GenerationJob.id)
+            .where(
+                CutImage.id == cut.selected_image_id,
+                CutImage.cut_id == cut.id,
+                GenerationJob.cut_id == cut.id,
+                GenerationJob.kind == GenerationKind.IMAGE,
+                GenerationJob.status == JobStatus.SUCCEEDED,
+            )
         )
-    )
-    if image is None:
+    ).first()
+    if row is None:
         raise AppError(
             status_code=409,
             code="SELECTED_IMAGE_REQUIRED",
             message="A successful selected image is required",
         )
-    return image
+    image, generation_mode = row
+    return image, generation_mode

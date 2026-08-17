@@ -624,6 +624,72 @@ async def test_image_selection_endpoint_rejects_unsuccessful_artifact(
     assert response.json() == {"code": "IMAGE_NOT_FOUND", "message": "Image not found"}
 
 
+async def test_video_rejects_a_source_image_generated_in_another_mode(
+    session: AsyncSession,
+) -> None:
+    """Mock artifacts cannot feed a Live generation, and the refusal must say so.
+
+    A Mock image URL is a relative path. Handing it to the Live provider produced an
+    anonymous permanent failure deep in the request builder; the operator saw only
+    "Generation provider failed" on the exact step that demonstrates runtime mode switching.
+    """
+    from app.generations import create_video_job
+    from app.schemas import CreateGenerationRequest
+
+    cut = await make_cut(session)
+    image = await make_succeeded_image(session, cut, version=1)
+    async with session.begin():
+        cut.selected_image_id = image.id
+
+    with pytest.raises(AppError, match="ARTIFACT_MODE_MISMATCH"):
+        await create_video_job(
+            session, cut.id, CreateGenerationRequest(), generation_mode="LIVE"
+        )
+
+
+async def test_video_accepts_a_source_image_from_the_same_mode(session: AsyncSession) -> None:
+    from app.generations import create_video_job
+    from app.schemas import CreateGenerationRequest
+
+    cut = await make_cut(session)
+    image = await make_succeeded_image(session, cut, version=1)
+    async with session.begin():
+        cut.selected_image_id = image.id
+
+    job = await create_video_job(
+        session, cut.id, CreateGenerationRequest(), generation_mode="MOCK"
+    )
+
+    assert job.source_image_id == image.id
+
+
+async def test_cross_mode_video_endpoint_returns_a_stable_conflict_envelope(
+    client: httpx.AsyncClient, generation_cut: Cut
+) -> None:
+    factory = async_sessionmaker(client._transport.app.state.engine, expire_on_commit=False)  # type: ignore[attr-defined]
+    async with factory() as session:
+        image = await make_succeeded_image(session, generation_cut, version=1)
+        async with session.begin():
+            cut = await session.get(Cut, generation_cut.id)
+            assert cut is not None
+            cut.selected_image_id = image.id
+    await client.put("/api/config", json={"generationMode": "MOCK"})
+
+    # The image above was recorded as MOCK; ask for a LIVE video over it.
+    async with factory.begin() as session:
+        job = await session.get(GenerationJob, image.generation_job_id)
+        assert job is not None
+        job.generation_mode = "LIVE"
+
+    response = await client.post(f"/api/cuts/{generation_cut.id}/videos", json={})
+
+    assert response.status_code == 409
+    assert response.json() == {
+        "code": "ARTIFACT_MODE_MISMATCH",
+        "message": "The selected image was generated in a different mode",
+    }
+
+
 async def test_job_records_the_requested_generation_mode(session: AsyncSession) -> None:
     from app.generations import create_image_job
     from app.schemas import CreateGenerationRequest
