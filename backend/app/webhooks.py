@@ -31,6 +31,10 @@ def verify_webhook_secret(configured: str | None, *provided: str | None) -> None
     webhook unsatisfiable: every delivery 401s and the provider retries forever. The secret
     therefore also travels as a query token in the callback URL we register. Both candidates
     are compared in constant time and the failure never says which one was tried.
+
+    The comparison runs on encoded bytes because `compare_digest` refuses non-ASCII `str`, and
+    an unauthenticated caller picks these bytes: a token in the URL, or a header Starlette
+    latin-1-decodes rather than rejects. On `str` that TypeError escapes as a bare 500.
     """
     if not configured:
         raise AppError(
@@ -38,9 +42,10 @@ def verify_webhook_secret(configured: str | None, *provided: str | None) -> None
             code="WEBHOOK_DISABLED",
             message="Webhook delivery is not configured",
         )
+    expected = configured.encode()
     matched = False
     for candidate in provided:
-        if candidate is not None and secrets.compare_digest(configured, candidate):
+        if candidate is not None and secrets.compare_digest(expected, candidate.encode()):
             matched = True
     if not matched:
         raise AppError(

@@ -11,8 +11,10 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from app.core.config import Settings
+from app.core.errors import AppError
 from app.main import create_app
 from app.models import Base, Cut, CutImage, GenerationJob, GenerationKind, JobStatus, Scene
+from app.webhooks import verify_webhook_secret
 
 WEBHOOK_SECRET = "webhook-shared-secret"
 
@@ -147,6 +149,64 @@ async def test_webhook_rejects_a_wrong_query_token(webhook_app) -> None:
         "message": "Webhook credentials are invalid",
     }
     assert (await reload_job(factory, job.id)).status == JobStatus.PROCESSING
+
+
+@pytest.mark.parametrize("bad_token", ["토큰", "🔑"])
+async def test_webhook_rejects_a_non_ascii_query_token(webhook_app, bad_token: str) -> None:
+    """An unauthenticated caller must not be able to pick bytes that crash the route.
+
+    `secrets.compare_digest` raises TypeError on non-ASCII `str`, and no handler translates
+    that into the shared envelope, so the one channel a Live provider can actually use would
+    answer a bare 500 to anything with a non-ASCII token in the URL.
+    """
+    client, factory, _ = webhook_app
+    job = await seed_processing_job(factory, task_id="task-token")
+
+    response = await client.post(
+        "/api/webhooks/kie",
+        params={"token": bad_token},
+        json=success_payload("task-token"),
+    )
+
+    assert response.status_code == 401
+    assert response.json() == {
+        "code": "WEBHOOK_UNAUTHORIZED",
+        "message": "Webhook credentials are invalid",
+    }
+    assert (await reload_job(factory, job.id)).status == JobStatus.PROCESSING
+
+
+async def test_webhook_rejects_a_non_ascii_header_secret(webhook_app) -> None:
+    """The header channel is reachable with the same bytes.
+
+    Starlette latin-1-decodes raw header bytes instead of rejecting them, so high bytes on the
+    wire arrive at the endpoint as a non-ASCII `str` exactly like the query token does.
+    """
+    client, factory, _ = webhook_app
+    job = await seed_processing_job(factory, task_id="task-1")
+
+    response = await client.post(
+        "/api/webhooks/kie",
+        json=success_payload("task-1"),
+        headers=[(b"x-webhook-secret", "토큰".encode())],
+    )
+
+    assert response.status_code == 401
+    assert response.json() == {
+        "code": "WEBHOOK_UNAUTHORIZED",
+        "message": "Webhook credentials are invalid",
+    }
+    assert (await reload_job(factory, job.id)).status == JobStatus.PROCESSING
+
+
+def test_verify_webhook_secret_compares_a_non_ascii_secret_byte_for_byte() -> None:
+    """Surviving non-ASCII means comparing it, not refusing everything that contains it."""
+    verify_webhook_secret("비밀-🔑", None, "비밀-🔑")
+
+    with pytest.raises(AppError) as rejected:
+        verify_webhook_secret("비밀-🔑", None, "비밀-🔓")
+
+    assert rejected.value.code == "WEBHOOK_UNAUTHORIZED"
 
 
 async def test_webhook_is_disabled_when_no_secret_is_configured(client) -> None:
