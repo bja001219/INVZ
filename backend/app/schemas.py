@@ -52,9 +52,12 @@ class SceneDraft(BaseModel):
 
     title: str = Field(min_length=1)
     scenario: str = Field(min_length=1)
+    # At least one, not at least two: consistency across cuts is the requirement, and a
+    # single-protagonist prompt must still produce a scene rather than a 502. The system
+    # instruction still asks for two to four, so the usual cast is unchanged.
     character_profiles: Annotated[
         list[CharacterProfile],
-        Field(alias="characterProfiles", min_length=2, max_length=4),
+        Field(alias="characterProfiles", min_length=1, max_length=4),
     ]
     cuts: Annotated[list[CutDraft], Field(min_length=6, max_length=6)]
 

@@ -20,7 +20,12 @@ from app.models import (
     Scene,
 )
 from app.prompting import compose_image_prompt, compose_video_prompt
-from app.providers.contracts import PermanentProviderError, RetryableProviderError, SceneProvider
+from app.providers.contracts import (
+    PermanentProviderError,
+    RetryableProviderError,
+    SceneProvider,
+    SchemaProviderError,
+)
 from app.schemas import (
     CharacterProfile,
     CutImageResponse,
@@ -124,6 +129,16 @@ async def _generate_draft(
     for retry_index in range(max_attempts):
         try:
             return SceneDraft.model_validate(await provider.generate(prompt))
+        # Listed before RetryableProviderError, which SchemaProviderError extends, so a
+        # rejected shape is reported as a schema failure rather than an outage.
+        except (SchemaProviderError, ValidationError) as error:
+            if retry_index == max_attempts - 1:
+                raise AppError(
+                    status_code=502,
+                    code="SCENE_SCHEMA_INVALID",
+                    message="Scene output was invalid",
+                ) from error
+            await clock.sleep(retry_base_delay_sec * 2**retry_index)
         except RetryableProviderError as error:
             if retry_index == max_attempts - 1:
                 raise AppError(
@@ -137,12 +152,6 @@ async def _generate_draft(
                 status_code=502,
                 code="SCENE_PROVIDER_FAILED",
                 message="Scene provider failed",
-            ) from error
-        except ValidationError as error:
-            raise AppError(
-                status_code=502,
-                code="SCENE_SCHEMA_INVALID",
-                message="Scene output was invalid",
             ) from error
 
     raise AssertionError("unreachable")

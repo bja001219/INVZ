@@ -7,7 +7,7 @@ from app.core.errors import AppError
 from app.main import create_app
 from app.models import Base, Scene
 from app.prompting import NEGATIVE_STYLE_GUIDE, VISUAL_STYLE_GUIDE, character_sheet
-from app.providers.contracts import RetryableProviderError, SceneProvider
+from app.providers.contracts import RetryableProviderError, SceneProvider, SchemaProviderError
 from app.scenes import create_scene
 from app.schemas import CharacterProfile, SceneCreateRequest, SceneDraft
 
@@ -23,15 +23,31 @@ def test_scene_draft_requires_ordered_six_five_second_cuts(
         SceneDraft.model_validate(valid_scene_payload)
 
 
-def test_scene_draft_requires_at_least_two_recurring_characters(
+def test_scene_draft_requires_a_named_recurring_cast(
+    valid_scene_payload: dict[str, object],
+) -> None:
+    """At least one character, not at least two.
+
+    Consistency is the requirement, not a headcount: a single-protagonist prompt must still
+    produce a scene. Two to four is what the system instruction asks the model for, so the
+    usual case is unchanged; the schema only refuses a scene with nobody in it.
+    """
+    valid_scene_payload["characterProfiles"] = []
+
+    with pytest.raises(ValidationError):
+        SceneDraft.model_validate(valid_scene_payload)
+
+
+def test_scene_draft_accepts_a_single_protagonist(
     valid_scene_payload: dict[str, object],
 ) -> None:
     profiles = valid_scene_payload["characterProfiles"]
     assert isinstance(profiles, list)
     valid_scene_payload["characterProfiles"] = profiles[:1]
 
-    with pytest.raises(ValidationError):
-        SceneDraft.model_validate(valid_scene_payload)
+    draft = SceneDraft.model_validate(valid_scene_payload)
+
+    assert len(draft.character_profiles) == 1
 
 
 def test_scene_draft_rejects_a_character_missing_an_identity_field(
@@ -77,7 +93,13 @@ class InvalidProvider(SceneProvider):
 
 async def test_scene_creation_rolls_back_invalid_provider_output(session) -> None:
     with pytest.raises(AppError, match="SCENE_SCHEMA_INVALID"):
-        await create_scene(session, InvalidProvider(), "moon voyage")
+        await create_scene(
+            session,
+            InvalidProvider(),
+            "moon voyage",
+            retry_base_delay_sec=0.01,
+            clock=RecordingClock(),  # type: ignore[arg-type]
+        )
 
     assert await session.scalar(select(func.count(Scene.id))) == 0
 
@@ -156,6 +178,65 @@ async def test_scene_creation_retries_typed_transient_provider_failures(
     assert scene.title == "Moon Voyage"
     assert provider.calls == 3
     assert clock.sleeps == [0.25, 0.5]
+
+
+class SchemaThenValidProvider(SceneProvider):
+    """The model returns a shape we reject, then gets it right — the usual LLM failure."""
+
+    def __init__(self, payload: dict[str, object], *, failures: int) -> None:
+        self._payload = payload
+        self._failures = failures
+        self.calls = 0
+
+    async def generate(self, prompt: str) -> SceneDraft:
+        self.calls += 1
+        if self.calls <= self._failures:
+            raise SchemaProviderError("OPENAI_RESPONSE_INVALID")
+        return SceneDraft.model_validate(self._payload)
+
+
+async def test_scene_creation_retries_a_shape_the_model_got_wrong(
+    session, valid_scene_payload: dict[str, object]
+) -> None:
+    """The retry budget has to cover the failure that actually happens.
+
+    Transport errors were retried while a rejected model output failed outright, even though
+    re-asking is free of side effects and usually succeeds — the opposite of the odds.
+    """
+    provider = SchemaThenValidProvider(valid_scene_payload, failures=2)
+    clock = RecordingClock()
+
+    scene = await create_scene(
+        session,
+        provider,
+        "moon voyage",
+        max_attempts=3,
+        retry_base_delay_sec=0.25,
+        clock=clock,  # type: ignore[arg-type]
+    )
+
+    assert provider.calls == 3
+    assert scene.title == "Moon Voyage"
+    assert clock.sleeps == [0.25, 0.5]
+
+
+async def test_scene_creation_reports_a_schema_failure_after_exhausting_retries(
+    session, valid_scene_payload: dict[str, object]
+) -> None:
+    provider = SchemaThenValidProvider(valid_scene_payload, failures=99)
+
+    with pytest.raises(AppError, match="SCENE_SCHEMA_INVALID"):
+        await create_scene(
+            session,
+            provider,
+            "moon voyage",
+            max_attempts=2,
+            retry_base_delay_sec=0.01,
+            clock=RecordingClock(),  # type: ignore[arg-type]
+        )
+
+    assert provider.calls == 2
+    assert await session.scalar(select(func.count(Scene.id))) == 0
 
 
 async def test_live_scene_api_uses_openai_provider(

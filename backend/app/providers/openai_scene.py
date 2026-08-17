@@ -9,7 +9,11 @@ from openai import (
 from pydantic import ValidationError
 
 from app.prompting import SCENE_SYSTEM_INSTRUCTION
-from app.providers.contracts import PermanentProviderError, RetryableProviderError
+from app.providers.contracts import (
+    PermanentProviderError,
+    RetryableProviderError,
+    SchemaProviderError,
+)
 from app.schemas import SceneDraft
 
 
@@ -52,11 +56,15 @@ class OpenAISceneProvider:
             raise PermanentProviderError("OPENAI_CONNECTION_FAILED") from error
         except APIStatusError as error:
             raise PermanentProviderError("OPENAI_REQUEST_FAILED") from error
-        except (httpx.HTTPError, ValidationError, TypeError, ValueError) as error:
+        except (ValidationError, TypeError, ValueError) as error:
+            # The model answered in a shape we reject. Worth re-asking, unlike a transport
+            # fault: nothing was created upstream and the next sample usually validates.
+            raise SchemaProviderError("OPENAI_RESPONSE_INVALID") from error
+        except httpx.HTTPError as error:
             raise PermanentProviderError("OPENAI_RESPONSE_INVALID") from error
 
         if not isinstance(draft, SceneDraft):
-            raise PermanentProviderError("OPENAI_RESPONSE_INVALID")
+            raise SchemaProviderError("OPENAI_RESPONSE_INVALID")
         return draft
 
 

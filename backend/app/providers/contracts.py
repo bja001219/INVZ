@@ -18,6 +18,15 @@ class RetryableProviderError(ProviderError):
     """A transient upstream failure that can be retried safely."""
 
 
+class SchemaProviderError(RetryableProviderError):
+    """The provider answered, but not in a shape we accept.
+
+    Retryable on purpose: the call has no side effect to duplicate, and a language model that
+    got the shape wrong once usually gets it right on the next attempt. Kept distinct from a
+    transport failure so the final error can say which one ran out of attempts.
+    """
+
+
 class PermanentProviderError(ProviderError):
     """An upstream failure that must not be retried."""
 

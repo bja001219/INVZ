@@ -7,7 +7,11 @@ from httpx import Response
 from openai import APIConnectionError, APITimeoutError
 
 from app.prompting import SCENE_SYSTEM_INSTRUCTION
-from app.providers.contracts import PermanentProviderError, RetryableProviderError
+from app.providers.contracts import (
+    PermanentProviderError,
+    RetryableProviderError,
+    SchemaProviderError,
+)
 from app.providers.openai_scene import OpenAISceneProvider
 from tests.conftest import build_scene_payload
 
@@ -104,14 +108,16 @@ async def test_openai_retryable_status_is_normalized(
         await provider.generate("moon voyage")
 
 
-async def test_openai_malformed_structured_output_is_permanent(
+async def test_openai_malformed_structured_output_is_retryable(
     provider: OpenAISceneProvider, respx_mock
 ) -> None:
+    """A rejected model shape is worth re-asking: nondeterminism alone often fixes it, and
+    the request has no side effect to duplicate."""
     respx_mock.post("https://api.openai.com/v1/responses").mock(
         return_value=Response(200, json=openai_scene_response({"title": "bad"}))
     )
 
-    with pytest.raises(PermanentProviderError, match="OPENAI_RESPONSE_INVALID"):
+    with pytest.raises(SchemaProviderError, match="OPENAI_RESPONSE_INVALID"):
         await provider.generate("moon voyage")
 
 
