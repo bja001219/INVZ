@@ -4,7 +4,7 @@ from contextlib import suppress
 from datetime import datetime, timedelta
 from uuid import UUID
 
-from sqlalchemy import Select, and_, or_, select
+from sqlalchemy import Select, and_, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.anchor import ANCHOR_CUT_ORDER, AnchorDecision, decide_anchor
@@ -33,6 +33,9 @@ from app.schemas import MockScenario
 logger = logging.getLogger(__name__)
 
 _CANDIDATE_PAGE_FLOOR = 24
+
+_IN_FLIGHT_JOB_STATUSES = (JobStatus.SUBMITTING, JobStatus.PROCESSING)
+"""A job a provider is already working on. QUEUED and RETRY_WAIT cost the provider nothing."""
 
 
 class GenerationWorker:
@@ -95,7 +98,10 @@ class GenerationWorker:
         """Advance the queue by one tick.
 
         Claiming is serial inside a single transaction so two jobs can never be claimed twice;
-        only the slow provider calls fan out, bounded by the configured concurrency.
+        only the slow provider calls fan out. The configured concurrency bounds how many jobs
+        are in flight with a provider at once, so a saturated tick claims nothing and falls
+        through to expiry and polling — which is what lets the in-flight jobs finish and free
+        the budget again.
         """
         if await self._recover_one_submitting():
             return True
@@ -133,7 +139,13 @@ class GenerationWorker:
     async def _claim_due_submissions(
         self, limit: int
     ) -> tuple[bool, list[GenerationRequest]]:
-        """Claim up to `limit` due jobs in one transaction.
+        """Claim due jobs in one transaction, up to the unused share of `limit`.
+
+        `limit` bounds work *in flight with a provider*, not claims per tick, so the same
+        transaction that selects due jobs first counts what is already SUBMITTING or PROCESSING
+        and claims only the difference. Counting per tick instead let a six-cut batch add one
+        more simultaneous provider task on every tick — with `limit` 1 all six ended up running
+        at once, which is exactly what the setting exists to prevent.
 
         Returns whether any row was written, which is separate from how many requests came back:
         a job can be terminally failed here (missing source image) without producing a request,
@@ -144,14 +156,15 @@ class GenerationWorker:
         requests: list[GenerationRequest] = []
         page_size = max(limit * 4, _CANDIDATE_PAGE_FLOOR)
         async with self._session_factory() as session, session.begin():
+            budget = max(0, limit - await self._count_in_flight(session))
             cursor: tuple[datetime, UUID] | None = None
-            while len(requests) < limit:
+            while len(requests) < budget:
                 page = list(await session.scalars(self._due_page(now, cursor, page_size)))
                 if not page:
                     break
                 cursor = (page[-1].created_at, page[-1].id)
                 for job in page:
-                    if len(requests) >= limit:
+                    if len(requests) >= budget:
                         break
                     source_image_url: str | None = None
                     reference_image_url: str | None = None
@@ -202,6 +215,14 @@ class GenerationWorker:
                         )
                     )
         return touched, requests
+
+    async def _count_in_flight(self, session: AsyncSession) -> int:
+        in_flight: int | None = await session.scalar(
+            select(func.count())
+            .select_from(GenerationJob)
+            .where(GenerationJob.status.in_(_IN_FLIGHT_JOB_STATUSES))
+        )
+        return in_flight or 0
 
     def _due_page(
         self,
@@ -287,12 +308,14 @@ class GenerationWorker:
         except SubmissionUncertainError:
             await self._fail(
                 request.job_id,
+                expected=JobStatus.SUBMITTING,
                 code="SUBMISSION_UNCERTAIN",
                 message="Generation submission outcome is uncertain",
             )
         except RetryableProviderError as error:
             await self._retry_or_fail(
                 request.job_id,
+                expected=JobStatus.SUBMITTING,
                 code=error.code,
                 message="Generation provider temporarily unavailable",
                 retry_after_seconds=error.retry_after_seconds,
@@ -300,6 +323,7 @@ class GenerationWorker:
         except PermanentProviderError as error:
             await self._fail(
                 request.job_id,
+                expected=JobStatus.SUBMITTING,
                 code=error.code,
                 message="Generation provider failed",
             )
@@ -386,6 +410,7 @@ class GenerationWorker:
         except PermanentProviderError as error:
             await self._fail(
                 job_id,
+                expected=JobStatus.PROCESSING,
                 code=error.code,
                 message="Generation provider failed",
             )
@@ -415,16 +440,20 @@ class GenerationWorker:
             if result.retryable:
                 await self._retry_or_fail(
                     job_id,
+                    expected=JobStatus.PROCESSING,
                     code=code,
                     message=message,
                     retry_after_seconds=None,
                 )
             else:
-                await self._fail(job_id, code=code, message=message)
+                await self._fail(
+                    job_id, expected=JobStatus.PROCESSING, code=code, message=message
+                )
             return
         if result.result_url is None or not result.result_url.strip():
             await self._fail(
                 job_id,
+                expected=JobStatus.PROCESSING,
                 code="PROVIDER_RESPONSE_INVALID",
                 message="Generation provider failed",
             )
@@ -487,13 +516,20 @@ class GenerationWorker:
         self,
         job_id: UUID,
         *,
+        expected: JobStatus,
         code: str,
         message: str,
         retry_after_seconds: float | None,
     ) -> None:
+        """Move a job off `expected` into RETRY_WAIT or FAILED, or do nothing if it moved on.
+
+        `expected` is a parameter rather than a hardcoded PROCESSING because a submission
+        failure fires while the job is still SUBMITTING; the guard has to fit both callers or
+        it silently disables the submit-failure path.
+        """
         async with self._session_factory() as session, session.begin():
             job = await session.get(GenerationJob, job_id)
-            if job is None:
+            if job is None or job.status is not expected:
                 return
             self._set_retry_or_failure(
                 job,
@@ -524,10 +560,12 @@ class GenerationWorker:
         job.last_error_code = code
         job.last_error_message = message
 
-    async def _fail(self, job_id: UUID, *, code: str, message: str) -> None:
+    async def _fail(
+        self, job_id: UUID, *, expected: JobStatus, code: str, message: str
+    ) -> None:
         async with self._session_factory() as session, session.begin():
             job = await session.get(GenerationJob, job_id)
-            if job is not None:
+            if job is not None and job.status is expected:
                 _terminal_failure(job, now=self._clock.now(), code=code, message=message)
 
 

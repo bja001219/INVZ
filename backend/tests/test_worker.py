@@ -15,6 +15,7 @@ from app.core.config import Settings
 from app.core.db import build_engine
 from app.main import create_app
 from app.models import (
+    CLAIMABLE_JOB_STATUSES,
     Base,
     Cut,
     CutImage,
@@ -245,6 +246,7 @@ def make_worker(
     clock: FakeClock,
     *,
     concurrency: int = 1,
+    attempt_timeout_sec: float = 10,
 ) -> GenerationWorker:
     return GenerationWorker(
         session_factory=factory,
@@ -252,7 +254,7 @@ def make_worker(
         clock=clock,
         retry_base_delay_sec=1,
         provider_poll_interval_sec=1,
-        generation_attempt_timeout_sec=10,
+        generation_attempt_timeout_sec=attempt_timeout_sec,
         concurrency=concurrency,
     )
 
@@ -287,6 +289,50 @@ async def load_job(factory: async_sessionmaker[AsyncSession], job: GenerationJob
         return stored
 
 
+async def load_cut(factory: async_sessionmaker[AsyncSession], cut: Cut) -> Cut:
+    async with factory() as session:
+        stored = await session.get(Cut, cut.id)
+        assert stored is not None
+        return stored
+
+
+async def in_flight_count(factory: async_sessionmaker[AsyncSession]) -> int:
+    """Jobs a provider is currently working on, which is what the concurrency cap bounds."""
+    async with factory() as session:
+        return cast(
+            int,
+            await session.scalar(
+                select(func.count())
+                .select_from(GenerationJob)
+                .where(
+                    GenerationJob.status.in_((JobStatus.SUBMITTING, JobStatus.PROCESSING)),
+                )
+            ),
+        )
+
+
+async def succeed_one_image_job(
+    factory: async_sessionmaker[AsyncSession], clock: FakeClock
+) -> tuple[Cut, GenerationJob, GenerationWorker]:
+    """Drive one image job to SUCCEEDED so a late delivery has a real terminal job to land on."""
+    cut = await add_cut(factory)
+    job = await add_image_job(
+        factory,
+        cut,
+        status=JobStatus.PROCESSING,
+        attempt_count=1,
+        external_task_id="task-1",
+        next_run_at=clock.now(),
+        attempt_deadline_at=clock.now() + timedelta(seconds=10),
+    )
+    provider = StubProvider(
+        poll_effects=[TaskResult(state="SUCCEEDED", result_url="https://cdn.example/done.png")]
+    )
+    worker = make_worker(factory, provider, clock)
+    await worker.run_once()
+    return cut, job, worker
+
+
 async def test_worker_handles_one_due_job_per_run(
     worker_db: async_sessionmaker[AsyncSession],
 ) -> None:
@@ -319,19 +365,75 @@ async def test_worker_submits_up_to_the_concurrency_limit_per_run(
     assert len(provider.submit_requests) == 3
 
 
-async def test_worker_drains_a_batch_across_successive_runs(
+async def test_worker_drains_a_batch_as_in_flight_work_completes(
     worker_db: async_sessionmaker[AsyncSession],
 ) -> None:
+    """The rest of a batch is claimed only once the first slice frees its concurrency budget.
+
+    This used to drain on the very next tick regardless, because in-flight jobs were never
+    counted again after the tick that claimed them.
+    """
     cuts = [await add_cut(worker_db, order=order) for order in range(1, 7)]
     jobs = [await add_image_job(worker_db, cut) for cut in cuts]
-    provider = StubProvider(submit_effects=[Submission(f"task-{n}") for n in range(6)])
-    worker = make_worker(worker_db, provider, FakeClock(), concurrency=3)
+    provider = StubProvider(
+        submit_effects=[Submission(f"task-{n}") for n in range(6)],
+        poll_effects=[
+            TaskResult(state="SUCCEEDED", result_url=f"https://cdn.example/{n}.png")
+            for n in range(3)
+        ],
+    )
+    clock = FakeClock()
+    worker = make_worker(worker_db, provider, clock, concurrency=3)
 
+    await worker.run_once()
+    blocked = [(await load_job(worker_db, job)).status for job in jobs]
+    await worker.run_once()
+    still_blocked = [(await load_job(worker_db, job)).status for job in jobs]
+
+    clock.advance(seconds=1)
     await worker.run_once()
     await worker.run_once()
 
     statuses = [(await load_job(worker_db, job)).status for job in jobs]
-    assert statuses == [JobStatus.PROCESSING] * 6
+    assert blocked.count(JobStatus.PROCESSING) == 3
+    assert still_blocked == blocked
+    assert statuses.count(JobStatus.SUCCEEDED) == 3
+    assert statuses.count(JobStatus.PROCESSING) == 3
+
+
+async def test_in_flight_provider_work_never_exceeds_the_concurrency_limit(
+    worker_db: async_sessionmaker[AsyncSession],
+) -> None:
+    """GENERATION_CONCURRENCY bounds in-flight provider work, not claims per tick.
+
+    A six-cut video batch against a provider that stays PENDING used to add one more
+    simultaneous task on every tick until all six were running at once, because the claim
+    counted only what it was about to claim and never what was already in flight.
+    """
+    cuts = await add_scene_cuts(worker_db, orders=(1, 2, 3, 4, 5, 6))
+    sources = [await add_source_image(worker_db, cut) for cut in cuts]
+    jobs = [
+        await add_video_job(worker_db, cut, source)
+        for cut, source in zip(cuts, sources, strict=True)
+    ]
+    provider = StubProvider(
+        submit_effects=[Submission(f"task-{n}") for n in range(6)],
+        poll_effects=[TaskResult(state="PENDING")] * 60,
+    )
+    clock = FakeClock()
+    worker = make_worker(worker_db, provider, clock, concurrency=2, attempt_timeout_sec=1000)
+
+    peak = 0
+    for _ in range(12):
+        await worker.run_once()
+        peak = max(peak, await in_flight_count(worker_db))
+        clock.advance(seconds=1)
+
+    assert peak == 2
+    assert len(provider.submit_requests) == 2
+    assert [(await load_job(worker_db, job)).status for job in jobs].count(
+        JobStatus.QUEUED
+    ) == 4
 
 
 async def test_non_anchor_image_waits_while_the_anchor_job_is_active(
@@ -738,6 +840,96 @@ async def test_permanent_task_failure_is_terminal_with_safe_fields(
     assert stored.completed_at is not None
 
 
+async def test_late_permanent_failure_leaves_a_succeeded_job_untouched(
+    worker_db: async_sessionmaker[AsyncSession],
+) -> None:
+    """A delivery that arrives after the job already succeeded must change nothing.
+
+    Both failure branches used to load the job and write without re-checking its status, so a
+    webhook landing seconds behind the poll that completed the job rewrote SUCCEEDED to FAILED
+    and the finished artifact was reported to the user as a failure.
+    """
+    clock = FakeClock()
+    cut, job, worker = await succeed_one_image_job(worker_db, clock)
+    before = await load_job(worker_db, job)
+    selected_before = (await load_cut(worker_db, cut)).selected_image_id
+    assert before.status == JobStatus.SUCCEEDED
+
+    clock.advance(seconds=60)
+    await worker.apply_external_result(
+        job.id,
+        TaskResult(
+            state="FAILED",
+            error_code="KIE_TASK_FAILED",
+            error_message="Generation provider failed",
+        ),
+    )
+
+    after = await load_job(worker_db, job)
+    assert after.status == JobStatus.SUCCEEDED
+    assert after.last_error_code is None
+    assert _aware(after.completed_at) == _aware(before.completed_at)
+    assert (await load_cut(worker_db, cut)).selected_image_id == selected_before
+
+
+async def test_late_retryable_failure_does_not_resurrect_a_succeeded_job(
+    worker_db: async_sessionmaker[AsyncSession],
+) -> None:
+    """A retryable late delivery is the worse half: RETRY_WAIT is claimable again.
+
+    The job would be picked up on the next tick, submitted a second time, and produce a
+    duplicate artifact for a cut that was already finished.
+    """
+    clock = FakeClock()
+    _, job, worker = await succeed_one_image_job(worker_db, clock)
+
+    clock.advance(seconds=60)
+    await worker.apply_external_result(
+        job.id,
+        TaskResult(
+            state="FAILED",
+            error_code="KIE_TASK_FAILED",
+            error_message="Generation provider failed",
+            retryable=True,
+        ),
+    )
+
+    after = await load_job(worker_db, job)
+    assert after.status == JobStatus.SUCCEEDED
+    assert after.status not in CLAIMABLE_JOB_STATUSES
+    assert after.next_run_at is None
+
+
+async def test_late_result_leaves_a_failed_job_terminal(
+    worker_db: async_sessionmaker[AsyncSession],
+) -> None:
+    clock = FakeClock()
+    cut = await add_cut(worker_db)
+    job = await add_image_job(
+        worker_db,
+        cut,
+        status=JobStatus.FAILED,
+        attempt_count=1,
+        external_task_id="task-1",
+    )
+    worker = make_worker(worker_db, StubProvider(), clock)
+
+    await worker.apply_external_result(
+        job.id,
+        TaskResult(
+            state="FAILED",
+            error_code="KIE_TASK_FAILED",
+            error_message="Generation provider failed",
+            retryable=True,
+        ),
+    )
+
+    after = await load_job(worker_db, job)
+    assert after.status == JobStatus.FAILED
+    assert after.last_error_code is None
+    assert after.next_run_at is None
+
+
 async def test_kie_contract_error_terminally_fails_processing_job(
     worker_db: async_sessionmaker[AsyncSession], respx_mock
 ) -> None:
@@ -937,7 +1129,9 @@ async def test_missing_video_source_transition_is_the_only_run_once_operation(
     )
     provider = StubProvider(poll_effects=[TaskResult(state="PENDING")])
 
-    await make_worker(worker_db, provider, clock).run_once()
+    # concurrency 2, not 1: the PROCESSING job holds one slot of the in-flight budget, and with
+    # no slot left the claim never walks the queue and never reaches the malformed job.
+    await make_worker(worker_db, provider, clock, concurrency=2).run_once()
 
     malformed_stored = await load_job(worker_db, malformed)
     polling_stored = await load_job(worker_db, polling)
@@ -1066,6 +1260,19 @@ async def test_app_lifespan_starts_and_stops_exactly_one_injected_worker(
 
     assert recording.starts == 1
     assert recording.stops == 1
+
+
+def test_attempt_timeout_default_outlasts_measured_video_latency(
+    settings_factory: Callable[..., Settings],
+) -> None:
+    """kling-2.6 image-to-video measured ~3m30s-4m00s on this project's own live run.
+
+    At the previous 120s default all six live videos hit the wall on attempt 1. The attempt was
+    abandoned without cancelling the upstream task and attempt 2 succeeded, so every video was
+    generated — and billed — twice. The abandon-and-resubmit mechanism is fine; the deadline was
+    simply shorter than the provider's normal latency.
+    """
+    assert settings_factory().generation_attempt_timeout_sec == 300
 
 
 def _aware(value: datetime | None) -> datetime:

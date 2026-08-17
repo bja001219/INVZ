@@ -27,7 +27,10 @@ class Settings(BaseSettings):
     generation_concurrency: int = Field(default=3, ge=1, le=16)
     retry_base_delay_sec: float = Field(default=1, gt=0)
     provider_poll_interval_sec: float = Field(default=1, gt=0)
-    generation_attempt_timeout_sec: float = Field(default=120, gt=0)
+    # 300, not 120: kling-2.6 image-to-video measured 3m30s-4m00s on this project's own live
+    # run, so the old deadline expired before the provider's normal latency. Every attempt was
+    # abandoned without cancelling the upstream task and resubmitted, billing each video twice.
+    generation_attempt_timeout_sec: float = Field(default=300, gt=0)
     webhook_secret: SecretStr = SecretStr("")
     webhook_public_url: str = ""
     self_base_url: str = "http://127.0.0.1:8000"
