@@ -9,6 +9,10 @@ version, and the six selected videos play back in Cut order.
 - Design spec: [`docs/superpowers/specs/2026-08-14-prompt-to-animation-design.md`](docs/superpowers/specs/2026-08-14-prompt-to-animation-design.md)
 - Batch, character consistency, runtime mode, and webhook design: [`docs/superpowers/specs/2026-08-16-batch-character-consistency-design.md`](docs/superpowers/specs/2026-08-16-batch-character-consistency-design.md)
 - Implementation plan: [`docs/superpowers/plans/2026-08-14-prompt-to-animation.md`](docs/superpowers/plans/2026-08-14-prompt-to-animation.md)
+- AI coding agent instructions: [`AGENTS.md`](AGENTS.md) (and [`CLAUDE.md`](CLAUDE.md), which points to it)
+
+Jump to [Quick start](#quick-start--mock-mode-no-api-keys), the
+[demo walkthrough](#demo-walkthrough), or [Verification](#verification).
 
 ## Scope and safety
 
@@ -43,13 +47,17 @@ Compose defaults to `GENERATION_MODE=mock`, requires no API key, stores SQLite i
 volume `backend-data`, and starts the frontend only after `GET /health` reports the backend
 healthy. Mock generation results are served from the backend at `/media/mock/*`.
 
-Mock and Live must not share a database file. Compose uses the Mock URL below; use a
-different file name when you run Live.
+Give each mode its own database file when you run them as separate processes, so a Live run
+never inherits Mock rows:
 
 ```dotenv
 # Mock
 DATABASE_URL=sqlite+aiosqlite:///./data/app-mock.db
 ```
+
+A single process that switches mode at runtime necessarily keeps both modes in one file. That
+is fine — every job records the mode that produced it, and mixing artifacts across modes is
+refused with `409 ARTIFACT_MODE_MISMATCH`.
 
 ### Running without Docker
 
@@ -69,8 +77,6 @@ npm run dev
 ## Live mode
 
 Live calls OpenAI for Scene drafting and Kie for image and image-to-video generation.
-Startup fails if either key is missing, so a misconfigured Live process never runs against
-Mock data.
 
 ```dotenv
 # Live — set the two keys in your own environment, never in a tracked file
@@ -80,15 +86,39 @@ KIE_API_KEY=
 DATABASE_URL=sqlite+aiosqlite:///./data/app-live.db
 ```
 
-`GENERATION_MODE` is read once at startup. There is no runtime mode switch and no endpoint
-that mutates it; `GET /api/config` returns only `{"generationMode": "MOCK" | "LIVE"}`.
+**Live spends money and the app has no cost guard.** "Generate all images" followed by
+"Generate all videos" is twelve real provider calls from two clicks, with no confirmation step
+and no usage counter. Use single-cut buttons when checking Live.
+
+`GENERATION_MODE` sets the mode the process **starts** in. `PUT /api/config` changes it at
+runtime, and each job follows the mode snapshot taken when it was created — see
+[Runtime Mock/Live switching](#runtime-mocklive-switching).
+
+The most useful configuration for a review is **`GENERATION_MODE=mock` with both keys present**:
+the app starts safe, nothing bills, and the Live button in the header is enabled so the runtime
+switch can be demonstrated on purpose rather than by accident.
+
+```dotenv
+GENERATION_MODE=mock        # start in Mock
+OPENAI_API_KEY=…            # present, so `liveAvailable` is true and Live is selectable
+KIE_API_KEY=…
+```
+
+Startup refuses to run only when `GENERATION_MODE=live` and a key is missing, so a process that
+is meant to be Live can never quietly serve Mock data.
+
+Because one process owns one database, artifacts from both modes land in the same file once you
+switch at runtime. That is intended, and mixing them is refused explicitly — see
+[Cross-mode artifacts](#cross-mode-artifacts).
 
 Models are fixed: `gpt-5.4-mini` (Scene), `google/nano-banana` (image), and
 `kling-2.6/image-to-video` (video).
 
 ## Environment variables
 
-Copy [`.env.example`](.env.example). It contains names and non-secret defaults only.
+Copy [`.env.example`](.env.example). It carries variable names, non-secret defaults, and one
+local-demo `WEBHOOK_SECRET` that authenticates callbacks to this app only — never a credential
+for any external service. The two API keys are left empty there on purpose.
 
 | Variable | Default | Meaning |
 |---|---|---|
@@ -117,8 +147,10 @@ React SPA
 FastAPI (1 process, 1 Uvicorn worker)
    ├─ scenes.py       routes + short transactions
    ├─ generations.py  routes + short transactions
-   ├─ providers/      Mock or Live adapter, chosen once at startup
-   └─ GenerationWorker (1 coroutine, at most one due job per run_once)
+   ├─ anchor.py       the scene-anchor gate, as one pure function
+   ├─ prompting.py    deterministic prompt composition, pure
+   ├─ providers/      Mock and Live adapters, resolved per job from its mode snapshot
+   └─ GenerationWorker (1 coroutine, up to GENERATION_CONCURRENCY jobs per run_once)
              │
              ▼
            SQLite
@@ -350,6 +382,45 @@ These are deliberate MVP limits, not production guarantees.
   the character sheet alone achieves.
 - **The runtime mode is in-memory.** Correct for one process; it would need shared state the
   moment a second process exists.
+
+## Demo walkthrough
+
+Six clicks that exercise every requirement, in Mock mode, spending nothing. Start the stack,
+open http://localhost:5173, and go in order.
+
+**1 — Prompt to six cuts.** Enter any prompt and press **Create scene**. Six Cut cards appear,
+each `5 sec`, and a **Characters in every cut** panel shows the recurring cast the model
+invented. The scene id is in the URL, so a refresh restores the same workspace.
+
+**2 — Batch image generation.** Press **Generate all images**. One request enqueues six jobs;
+`Images 0/6 done` climbs as the worker drains them at most `GENERATION_CONCURRENCY` at a time.
+
+**3 — Character consistency.** Open any Cut's image history. Every cut's prompt carries the same
+character section, and Cuts 2-6 additionally show `Reference  Image v1` — Cut 1's selected image
+sent to the model as the scene anchor. Cut 1 has no reference, because it *is* the anchor.
+
+To see the gate refuse to guess: create a **new** scene, leave Cut 1 alone and press
+**Generate image** on Cut 3 only. The job holds at `Queued` and says *"Waiting for the Cut 1
+image so this cut keeps the same characters."* Generate Cut 1 and it releases by itself.
+
+**4 — Retry, final failure, and regenerate history.** Set a Cut's **Mock scenario** dropdown to
+`Always fail` and generate: the job retries with backoff and settles at
+`Failed after 3/3 attempts`. Switch the dropdown to `Success` and press **Regenerate** — v2
+succeeds and **v1 stays in the history** with its failure reason. `Fail twice, then succeed`
+shows the middle case.
+
+**5 — Webhook instead of polling.** Set the dropdown to `Succeed via webhook` and generate.
+Mock's polling for this scenario never returns success on purpose, so the job can only finish if
+the callback route works. The backend log shows exactly one `POST /api/webhooks/kie`.
+
+**6 — Runtime mode switch and playback.** The header switch flips Mock/Live without a restart;
+Live is selectable only when both keys are configured. Requesting a Live video over an image
+generated in Mock returns `409 ARTIFACT_MODE_MISMATCH` rather than failing inside the provider.
+Finally press **Generate all videos**, wait for `6 of 6 videos ready`, and **Play sequence**
+plays the six selected videos in Cut order.
+
+Every job card shows what produced it: the composed prompt, `MOCK`/`LIVE`, attempt count, source
+image for a video, reference image for an image, and the failure reason when there is one.
 
 ## Verification
 
