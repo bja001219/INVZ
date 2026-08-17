@@ -1,3 +1,4 @@
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Literal, Protocol
 from uuid import UUID
@@ -43,6 +44,10 @@ class GenerationRequest:
 @dataclass(frozen=True)
 class Submission:
     external_task_id: str
+    # Work the provider wants run once the job is durably PROCESSING, not before. A provider
+    # that pushes its own callback would otherwise race the worker's commit and deliver a
+    # result to a job that cannot accept one yet.
+    on_processing: Callable[[], Awaitable[None]] | None = None
 
 
 @dataclass(frozen=True)

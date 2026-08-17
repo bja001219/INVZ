@@ -183,6 +183,10 @@ The worker, not the batch, owns concurrency. Each `run_once()` claims up to
 calls with `asyncio.gather`. Serial claiming makes double-claiming structurally impossible and
 keeps SQLite write locks short; parallelism is applied where the latency actually is.
 
+Claiming walks the queue by keyset pages rather than one capped fetch, because anchor-gated
+jobs are skipped without being written: a single bounded read could fill up entirely with gated
+jobs and hide every runnable job behind them.
+
 Batch progress in the UI is derived from the jobs themselves rather than stored on the batch
 row, so the displayed counts can never disagree with the state machine.
 
@@ -208,9 +212,13 @@ stored on the Cut, which is also what the UI shows as the generation input.
 
 On top of that, Cut 1's **selected image becomes the scene anchor**: Cuts 2-6 send it to the
 image model as `image_urls` so the same faces are redrawn rather than reinvented. Image batches
-therefore run in two phases — Cut 1 alone, then the rest in parallel. Cuts 2-6 wait only while
-an anchor job is *active*, so a permanently failed Cut 1 opens the gate instead of stalling the
-scene forever.
+therefore run in two phases — Cut 1 alone, then the rest in parallel.
+
+The gate holds Cuts 2-6 for as long as an anchor could still arrive, including when Cut 1 was
+never requested at all — pressing a single cut's button outside a batch must not quietly produce
+an unanchored image. A held job reports `waitingForAnchor`, and the UI says which cut it is
+waiting on, so nothing stalls without an explanation. The one release is Cut 1 exhausting its
+retries: a permanently failed anchor opens the gate rather than stalling the scene forever.
 
 ### Visual style
 
@@ -246,6 +254,11 @@ delivery that can never change anything.
 In Mock mode the `SUCCEED_VIA_WEBHOOK` scenario makes the provider post a real callback to
 `SELF_BASE_URL`, while its polling deliberately never succeeds — so the job can only finish if
 the webhook route works.
+
+A provider that pushes its own result hands the delivery back on `Submission.on_processing`
+instead of sending it during `submit()`; the worker fires it only after the job is committed as
+`PROCESSING`. Otherwise a fast callback races that very commit, finds no job to apply itself to,
+and the job idles until its attempt deadline expires.
 
 ### Regeneration and active-job conflict
 

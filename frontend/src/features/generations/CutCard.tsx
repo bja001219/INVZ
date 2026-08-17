@@ -77,6 +77,11 @@ function GenerationHistory({ cut, jobs, kind }: {
             <p><span>Prompt</span>{job.prompt}</p>
             {sourceImage && <p><span>Source image</span>{sourceImage}</p>}
             {referenceImage && <p><span>Reference</span>{referenceImage}</p>}
+            {job.waitingForAnchor && (
+              <p className="job__waiting">
+                Waiting for the Cut 1 image so this cut keeps the same characters.
+              </p>
+            )}
             {job.nextRunAt && (
               <p><span>Next retry</span><time dateTime={job.nextRunAt}>{new Date(job.nextRunAt).toLocaleString()}</time></p>
             )}

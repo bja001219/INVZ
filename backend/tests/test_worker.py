@@ -127,6 +127,7 @@ async def add_image_job(
     external_task_id: str | None = None,
     attempt_deadline_at: datetime | None = None,
     scenario: MockScenario | None = None,
+    created_at: datetime | None = None,
 ) -> GenerationJob:
     async with factory.begin() as session:
         version = cast(
@@ -151,6 +152,10 @@ async def add_image_job(
             attempt_deadline_at=attempt_deadline_at,
             mock_scenario=scenario.value if scenario is not None else None,
         )
+        # Claim order is (created_at, id); tests that care about which job is reached first
+        # set it explicitly because SQLite's default timestamp only has second resolution.
+        if created_at is not None:
+            job.created_at = created_at
         session.add(job)
         await session.flush()
         return job
@@ -344,7 +349,73 @@ async def test_non_anchor_image_waits_while_the_anchor_job_is_active(
     assert len(provider.submit_requests) == 1
 
 
-async def test_non_anchor_image_proceeds_unreferenced_once_no_anchor_job_is_active(
+async def test_non_anchor_image_waits_when_the_anchor_cut_was_never_started(
+    worker_db: async_sessionmaker[AsyncSession],
+) -> None:
+    """Generating a single cut outside a batch must not slip past the gate.
+
+    The gate used to open whenever no anchor job was *active*, which included the case where
+    Cut 1 had simply never been requested. Cut 3's button then produced an unreferenced image
+    and character consistency broke with nothing to tell the user why.
+    """
+    _, second = await add_scene_cuts(worker_db, orders=(1, 2))
+    follower_job = await add_image_job(worker_db, second)
+    provider = StubProvider(submit_effects=[])
+
+    worked = await make_worker(worker_db, provider, FakeClock(), concurrency=3).run_once()
+
+    assert worked is False
+    assert (await load_job(worker_db, follower_job)).status == JobStatus.QUEUED
+    assert provider.submit_requests == []
+
+
+async def test_claiming_looks_past_a_full_page_of_gated_jobs(
+    worker_db: async_sessionmaker[AsyncSession],
+) -> None:
+    """A runnable job must not be hidden behind more gated jobs than one page holds."""
+    base = datetime(2026, 8, 14, 11, 0, tzinfo=UTC)
+    for scene_index in range(5):
+        cuts = await add_scene_cuts(worker_db, orders=(1, 2, 3, 4, 5, 6))
+        for offset, gated_cut in enumerate(cuts[1:]):
+            await add_image_job(
+                worker_db,
+                gated_cut,
+                created_at=base + timedelta(seconds=scene_index * 10 + offset),
+            )
+    runnable_cut = await add_cut(worker_db, order=1)
+    runnable = await add_image_job(worker_db, runnable_cut, created_at=base + timedelta(hours=1))
+    provider = StubProvider(submit_effects=[Submission("runnable")])
+
+    await make_worker(worker_db, provider, FakeClock(), concurrency=1).run_once()
+
+    assert (await load_job(worker_db, runnable)).status == JobStatus.PROCESSING
+    assert [request.job_id for request in provider.submit_requests] == [runnable.id]
+
+
+async def test_submission_callback_runs_only_once_the_job_is_processing(
+    worker_db: async_sessionmaker[AsyncSession],
+) -> None:
+    """Providers that push a callback must not fire it before the job can accept one.
+
+    Mock's webhook used to be scheduled inside `submit()`, so a zero delay could deliver the
+    callback while the job was still SUBMITTING. The webhook found nothing to apply and the
+    job then sat idle until its attempt deadline expired.
+    """
+    cut = await add_cut(worker_db)
+    job = await add_image_job(worker_db, cut)
+    observed: list[JobStatus] = []
+
+    async def on_processing() -> None:
+        observed.append((await load_job(worker_db, job)).status)
+
+    provider = StubProvider(submit_effects=[Submission("task-1", on_processing=on_processing)])
+
+    await make_worker(worker_db, provider, FakeClock()).run_once()
+
+    assert observed == [JobStatus.PROCESSING]
+
+
+async def test_non_anchor_image_proceeds_unreferenced_once_the_anchor_failed_permanently(
     worker_db: async_sessionmaker[AsyncSession],
 ) -> None:
     first, second = await add_scene_cuts(worker_db, orders=(1, 2))

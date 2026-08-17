@@ -35,6 +35,18 @@ class JobStatus(StrEnum):
     FAILED = "FAILED"
 
 
+ACTIVE_JOB_STATUSES = (
+    JobStatus.QUEUED,
+    JobStatus.SUBMITTING,
+    JobStatus.PROCESSING,
+    JobStatus.RETRY_WAIT,
+)
+"""A job the queue still owns. Mirrors the partial unique index below."""
+
+CLAIMABLE_JOB_STATUSES = (JobStatus.QUEUED, JobStatus.RETRY_WAIT)
+"""A job the worker may still pick up on its next tick."""
+
+
 class Base(DeclarativeBase):
     pass
 

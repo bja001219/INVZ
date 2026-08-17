@@ -105,6 +105,22 @@ test("REQ-01..REQ-17: batches six consistent cuts, retries, regenerates, restore
   await expect(page.getByText("Cut video could not be loaded")).toHaveCount(0);
 });
 
+test("REQ-13: a cut generated outside a batch holds for the scene anchor", async ({ page }) => {
+  await page.goto("/");
+  await page.getByLabel("Animation prompt").fill("A rainy rooftop goodbye between two friends");
+  await page.getByRole("button", { name: "Create scene" }).click();
+  await expect(page.getByRole("region", { name: /^Cut \d$/ })).toHaveCount(6);
+
+  // Cut 1 was never requested, so Cut 3 has no anchor to match. It must say so rather than
+  // quietly generate a character nobody else in the scene resembles.
+  const third = cutRegion(page, 3);
+  await third.getByRole("button", { name: "Generate image" }).click();
+
+  const held = generationJob(third, "Image", 1);
+  await expect(held).toContainText("Waiting for the Cut 1 image");
+  await expect(held.getByText(/^Queued/)).toBeVisible();
+});
+
 test("REQ-16: a Mock generation can complete through the webhook instead of polling", async ({
   page,
 }) => {

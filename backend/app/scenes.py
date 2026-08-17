@@ -5,9 +5,20 @@ from pydantic import ValidationError
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.anchor import ANCHOR_CUT_ORDER, AnchorDecision, decide_anchor
 from app.core.clock import Clock
 from app.core.errors import AppError
-from app.models import Cut, CutImage, CutVideo, GenerationJob, GenerationKind, Scene
+from app.models import (
+    ACTIVE_JOB_STATUSES,
+    CLAIMABLE_JOB_STATUSES,
+    Cut,
+    CutImage,
+    CutVideo,
+    GenerationJob,
+    GenerationKind,
+    JobStatus,
+    Scene,
+)
 from app.prompting import compose_image_prompt, compose_video_prompt
 from app.providers.contracts import PermanentProviderError, RetryableProviderError, SceneProvider
 from app.schemas import (
@@ -154,6 +165,16 @@ def _scene_response(
         images_by_cut.setdefault(image.cut_id, []).append(image)
     for video in videos:
         videos_by_cut.setdefault(video.cut_id, []).append(video)
+    anchor_cut = next((cut for cut in cuts if cut.order == ANCHOR_CUT_ORDER), None)
+    anchor_statuses = (
+        {
+            job.status
+            for job in jobs_by_cut.get(anchor_cut.id, [])
+            if job.kind is GenerationKind.IMAGE
+        }
+        if anchor_cut is not None
+        else set()
+    )
     return SceneResponse(
         id=scene.id,
         user_prompt=scene.user_prompt,
@@ -168,6 +189,16 @@ def _scene_response(
                 jobs=jobs_by_cut.get(cut.id, []),
                 images=images_by_cut.get(cut.id, []),
                 videos=videos_by_cut.get(cut.id, []),
+                anchor_gated=decide_anchor(
+                    cut_order=cut.order,
+                    anchor_cut_exists=anchor_cut is not None,
+                    anchor_image_ready=(
+                        anchor_cut is not None and anchor_cut.selected_image_id is not None
+                    ),
+                    anchor_job_active=bool(anchor_statuses.intersection(ACTIVE_JOB_STATUSES)),
+                    anchor_job_failed=JobStatus.FAILED in anchor_statuses,
+                )
+                is AnchorDecision.WAIT,
             )
             for cut in cuts
         ],
@@ -180,8 +211,18 @@ def _cut_response(
     jobs: Sequence[GenerationJob],
     images: Sequence[CutImage],
     videos: Sequence[CutVideo],
+    anchor_gated: bool = False,
 ) -> CutResponse:
-    image_jobs = [_job_response(job) for job in jobs if job.kind is GenerationKind.IMAGE]
+    image_jobs = [
+        _job_response(
+            job,
+            # A gated job is one the claimer would skip, which is exactly the set it still
+            # considers: anything already submitted has passed the gate.
+            waiting_for_anchor=anchor_gated and job.status in CLAIMABLE_JOB_STATUSES,
+        )
+        for job in jobs
+        if job.kind is GenerationKind.IMAGE
+    ]
     video_jobs = [_job_response(job) for job in jobs if job.kind is GenerationKind.VIDEO]
     return CutResponse(
         id=cut.id,
@@ -219,7 +260,7 @@ def _cut_response(
     )
 
 
-def _job_response(job: GenerationJob) -> GenerationJobResponse:
+def _job_response(job: GenerationJob, *, waiting_for_anchor: bool = False) -> GenerationJobResponse:
     return GenerationJobResponse(
         id=job.id,
         kind=job.kind,
@@ -230,6 +271,7 @@ def _job_response(job: GenerationJob) -> GenerationJobResponse:
         source_image_id=job.source_image_id,
         reference_image_id=job.reference_image_id,
         batch_id=job.batch_id,
+        waiting_for_anchor=waiting_for_anchor,
         attempt_count=job.attempt_count,
         max_attempts=job.max_attempts,
         next_run_at=job.next_run_at,

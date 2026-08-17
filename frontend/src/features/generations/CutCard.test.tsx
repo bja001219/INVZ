@@ -93,6 +93,24 @@ describe("CutCard", () => {
     expect(within(anchorJob).queryByText("Reference")).not.toBeInTheDocument();
   });
 
+  it("explains that a queued job is holding for the Cut 1 anchor image", () => {
+    const gated = generationJob({ status: "QUEUED", waitingForAnchor: true });
+
+    renderCut(cutDetail({ order: 3, imageJobs: [gated] }));
+
+    const job = screen.getByRole("article", { name: "Image generation v1" });
+    expect(within(job).getByText(/waiting for the cut 1 image/i)).toBeInTheDocument();
+  });
+
+  it("says nothing about the anchor once a job is no longer gated", () => {
+    const running = generationJob({ status: "PROCESSING" });
+
+    renderCut(cutDetail({ order: 3, imageJobs: [running] }));
+
+    const job = screen.getByRole("article", { name: "Image generation v1" });
+    expect(within(job).queryByText(/waiting for the cut 1 image/i)).not.toBeInTheDocument();
+  });
+
   it("disables generation immediately while the mutation is pending", async () => {
     const user = userEvent.setup();
     const receivedImageRequests: unknown[] = [];

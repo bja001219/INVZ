@@ -138,6 +138,9 @@ class GenerationJobResponse(BaseModel):
         default=None, serialization_alias="referenceImageId"
     )
     batch_id: UUID | None = Field(default=None, serialization_alias="batchId")
+    # Why an otherwise idle job has not started: it is holding for the scene anchor image so
+    # the cut stays consistent with Cut 1. Derived per request, never stored.
+    waiting_for_anchor: bool = Field(default=False, serialization_alias="waitingForAnchor")
     attempt_count: int = Field(serialization_alias="attemptCount")
     max_attempts: int = Field(serialization_alias="maxAttempts")
     next_run_at: datetime | None = Field(serialization_alias="nextRunAt")

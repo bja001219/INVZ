@@ -101,6 +101,7 @@ textarea:focus, select:focus { border-color: var(--accent); box-shadow: 0 0 0 3p
 .job__status { color: var(--muted); font-size: 11px; }
 .job p { margin: 10px 0 0; color: #4b4943; line-height: 1.45; }
 .job__error { color: #9f2f2a !important; font-weight: 600; }
+.job__waiting { color: #8a6410 !important; font-weight: 600; }
 
 @media (max-width: 860px) {
   .app-shell { padding: 0 20px 50px; }

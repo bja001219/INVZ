@@ -382,6 +382,77 @@ async def test_scene_detail_returns_newest_history_and_lineage(session: AsyncSes
     assert detail.videos[0].cut_image_id == newer_image.id
 
 
+async def make_scene_cuts(session: AsyncSession, *, orders: tuple[int, ...]) -> list[Cut]:
+    async with session.begin():
+        scene = Scene(user_prompt="prompt", title="title", scenario="scenario")
+        session.add(scene)
+        await session.flush()
+        cuts = [
+            Cut(
+                scene_id=scene.id,
+                order=order,
+                image_prompt=f"image prompt {order}",
+                video_prompt=f"video prompt {order}",
+                duration_sec=5,
+            )
+            for order in orders
+        ]
+        session.add_all(cuts)
+        await session.flush()
+    return cuts
+
+
+async def make_queued_image_job(session: AsyncSession, cut: Cut) -> GenerationJob:
+    async with session.begin():
+        job = GenerationJob(
+            cut_id=cut.id,
+            kind=GenerationKind.IMAGE,
+            version=1,
+            status=JobStatus.QUEUED,
+            prompt=cut.image_prompt,
+        )
+        session.add(job)
+        await session.flush()
+    return job
+
+
+async def test_scene_detail_marks_image_jobs_waiting_for_the_scene_anchor(
+    session: AsyncSession,
+) -> None:
+    """A gated job looks idle. The response has to say why it is not moving."""
+    first, second = await make_scene_cuts(session, orders=(1, 2))
+    await make_queued_image_job(session, second)
+
+    scene = await get_scene(session, first.scene_id)
+
+    assert scene.cuts[1].image_jobs[0].waiting_for_anchor is True
+
+
+async def test_scene_detail_clears_the_anchor_wait_once_cut_one_has_an_image(
+    session: AsyncSession,
+) -> None:
+    first, second = await make_scene_cuts(session, orders=(1, 2))
+    anchor_image = await make_succeeded_image(session, first, version=1)
+    async with session.begin():
+        first.selected_image_id = anchor_image.id
+    await make_queued_image_job(session, second)
+
+    scene = await get_scene(session, first.scene_id)
+
+    assert scene.cuts[1].image_jobs[0].waiting_for_anchor is False
+
+
+async def test_scene_detail_never_marks_the_anchor_cut_as_waiting(
+    session: AsyncSession,
+) -> None:
+    first, _ = await make_scene_cuts(session, orders=(1, 2))
+    await make_queued_image_job(session, first)
+
+    scene = await get_scene(session, first.scene_id)
+
+    assert scene.cuts[0].image_jobs[0].waiting_for_anchor is False
+
+
 async def _insert_cut_for_client(client: httpx.AsyncClient) -> Cut:
     factory = async_sessionmaker(client._transport.app.state.engine, expire_on_commit=False)  # type: ignore[attr-defined]
     async with factory() as session:
@@ -456,6 +527,7 @@ async def test_generation_route_returns_queued_job_and_uses_mock_scenario(
         "sourceImageId": None,
         "referenceImageId": None,
         "batchId": None,
+        "waitingForAnchor": False,
         "attemptCount": 0,
         "maxAttempts": 3,
         "nextRunAt": None,

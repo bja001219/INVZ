@@ -100,8 +100,15 @@ class MockGenerationProvider:
             task_id = (
                 f"mockhook:{request.kind.value}:{request.job_id}:{request.attempt_count}"
             )
-            await self._webhook_sender(task_id, request.kind)
-            return Submission(external_task_id=task_id)
+            sender = self._webhook_sender
+            kind = request.kind
+
+            async def deliver() -> None:
+                await sender(task_id, kind)
+
+            # Handed back rather than sent: the worker fires it once the job is PROCESSING, so
+            # a zero delivery delay cannot beat the job into a state that accepts the result.
+            return Submission(external_task_id=task_id, on_processing=deliver)
         return Submission(
             external_task_id=f"mock:{request.kind.value}:{request.job_id}:{request.attempt_count}"
         )

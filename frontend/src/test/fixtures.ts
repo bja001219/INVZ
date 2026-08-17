@@ -49,6 +49,7 @@ export function generationJob(
     sourceImageId: null,
     referenceImageId: null,
     batchId: null,
+    waitingForAnchor: false,
     attemptCount: 1,
     maxAttempts: 3,
     nextRunAt: null,

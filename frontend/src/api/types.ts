@@ -56,6 +56,8 @@ export interface GenerationJob {
   sourceImageId: string | null;
   referenceImageId: string | null;
   batchId: string | null;
+  /** Held back so this cut can reuse Cut 1's image as the character anchor. */
+  waitingForAnchor: boolean;
   attemptCount: number;
   maxAttempts: number;
   nextRunAt: string | null;
