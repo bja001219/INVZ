@@ -16,9 +16,21 @@ class SecretRedactionFilter(logging.Filter):
             value = value.replace(secret, "[REDACTED]")
         return value
 
+    def _redact_value(self, value: object) -> object:
+        """Strings are cleaned; everything else keeps its type so `%d` and friends still work."""
+        return self._redact(value) if isinstance(value, str) else value
+
     def filter(self, record: logging.LogRecord) -> bool:
-        record.msg = self._redact(record.getMessage())
-        record.args = ()
+        # Message and arguments are redacted in place, never collapsed into one string.
+        # Uvicorn's access formatter reads the five positional arguments off the record
+        # instead of the rendered message, so replacing `args` with an empty tuple made every
+        # access line raise ValueError and print a logging-error dump in its place.
+        if isinstance(record.msg, str):
+            record.msg = self._redact(record.msg)
+        if isinstance(record.args, tuple):
+            record.args = tuple(self._redact_value(value) for value in record.args)
+        elif isinstance(record.args, dict):
+            record.args = {key: self._redact_value(value) for key, value in record.args.items()}
         if record.exc_info:
             exception_text = logging.Formatter().formatException(record.exc_info)
             record.exc_text = self._redact(exception_text)

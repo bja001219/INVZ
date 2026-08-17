@@ -235,6 +235,49 @@ def test_secret_redaction_reaches_handlers_installed_after_configuration() -> No
     assert "openai-secret" not in output.getvalue()
 
 
+class UnpackingAccessFormatter(logging.Formatter):
+    """Uvicorn's access formatter, reduced to the part that matters here.
+
+    It reads the five positional arguments off the record rather than the rendered message,
+    so a redactor that blanks `record.args` makes every access line raise instead of print.
+    """
+
+    def formatMessage(self, record: logging.LogRecord) -> str:
+        client_addr, method, full_path, http_version, status_code = record.args  # type: ignore[misc]
+        return f'{client_addr} - "{method} {full_path} HTTP/{http_version}" {status_code}'
+
+
+def test_secret_redaction_keeps_log_record_arguments_usable() -> None:
+    output = StringIO()
+    handler = logging.StreamHandler(output)
+    handler.setFormatter(UnpackingAccessFormatter())
+    logger = logging.getLogger("test.access.formatter")
+    logger.addHandler(handler)
+    logger.propagate = False
+    logger.setLevel(logging.INFO)
+
+    try:
+        configure_secret_redaction(["openai-secret"])
+        logger.info(
+            '%s - "%s %s HTTP/%s" %d',
+            "127.0.0.1:1234",
+            "POST",
+            "/api/webhooks/kie?token=openai-secret",
+            "1.1",
+            200,
+        )
+    finally:
+        reset_secret_redaction()
+        logger.removeHandler(handler)
+
+    rendered = output.getvalue()
+    assert "openai-secret" not in rendered
+    assert "?token=[REDACTED]" in rendered
+    # The line rendered at all, which is the regression: a blanked args tuple raised here.
+    assert '"POST' in rendered
+    assert "200" in rendered
+
+
 def test_resetting_redaction_restores_plain_logging() -> None:
     configure_secret_redaction(["openai-secret"])
     reset_secret_redaction()
