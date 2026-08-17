@@ -15,10 +15,19 @@ import type {
 
 const activeStatuses = new Set(["QUEUED", "SUBMITTING", "PROCESSING", "RETRY_WAIT"]);
 
+/** Where an image lives in the scene, so a job can be labelled by the cut that produced it. */
+export interface ImageOrigin {
+  cutOrder: number;
+  version: number;
+}
+
+export type ImageIndex = Map<string, ImageOrigin>;
+
 interface CutCardProps {
   cut: Cut;
   sceneId: string;
   generationMode: GenerationMode;
+  imageIndex: ImageIndex;
 }
 
 function versionForArtifact(
@@ -26,6 +35,23 @@ function versionForArtifact(
   jobs: GenerationJob[],
 ): number {
   return jobs.find((job) => job.id === generationJobId)?.version ?? 0;
+}
+
+/**
+ * A job's reference image is Cut 1's anchor by construction, and the scene response buckets
+ * images under their own cut, so only a scene-wide index can name it.
+ */
+export function buildImageIndex(cuts: Cut[]): ImageIndex {
+  const index: ImageIndex = new Map();
+  for (const cut of cuts) {
+    for (const image of cut.images) {
+      index.set(image.id, {
+        cutOrder: cut.order,
+        version: versionForArtifact(image.generationJobId, cut.imageJobs),
+      });
+    }
+  }
+  return index;
 }
 
 function jobStatus(job: GenerationJob): string {
@@ -39,15 +65,21 @@ function jobStatus(job: GenerationJob): string {
   return `${label[0].toUpperCase()}${label.slice(1)} · ${job.attemptCount}/${job.maxAttempts} attempts`;
 }
 
-function imageVersionLabel(imageId: string | null, cut: Cut): string | null {
+function imageVersionLabel(
+  imageId: string | null,
+  cut: Cut,
+  imageIndex: ImageIndex,
+): string | null {
   if (!imageId) return null;
-  const image = cut.images.find((candidate) => candidate.id === imageId);
-  if (!image) return imageId;
-  return `Image v${versionForArtifact(image.generationJobId, cut.imageJobs)}`;
+  const origin = imageIndex.get(imageId);
+  if (!origin) return imageId;
+  const version = `Image v${origin.version}`;
+  return origin.cutOrder === cut.order ? version : `Cut ${origin.cutOrder} · ${version}`;
 }
 
-function GenerationHistory({ cut, jobs, kind }: {
+function GenerationHistory({ cut, imageIndex, jobs, kind }: {
   cut: Cut;
+  imageIndex: ImageIndex;
   jobs: GenerationJob[];
   kind: GenerationKind;
 }) {
@@ -59,8 +91,8 @@ function GenerationHistory({ cut, jobs, kind }: {
   return (
     <div className="history-list">
       {sortedJobs.map((job) => {
-        const sourceImage = imageVersionLabel(job.sourceImageId, cut);
-        const referenceImage = imageVersionLabel(job.referenceImageId, cut);
+        const sourceImage = imageVersionLabel(job.sourceImageId, cut, imageIndex);
+        const referenceImage = imageVersionLabel(job.referenceImageId, cut, imageIndex);
         return (
           <article
             aria-label={`${title} generation v${job.version}`}
@@ -109,7 +141,7 @@ function sortedVideos(cut: Cut): CutVideo[] {
   );
 }
 
-export function CutCard({ cut, sceneId, generationMode }: CutCardProps) {
+export function CutCard({ cut, sceneId, generationMode, imageIndex }: CutCardProps) {
   const queryClient = useQueryClient();
   const [mockScenario, setMockScenario] = useState<MockScenario>("SUCCESS");
   const sceneKey = ["scene", sceneId] as const;
@@ -238,7 +270,7 @@ export function CutCard({ cut, sceneId, generationMode }: CutCardProps) {
               );
             })}
           </div>
-          <GenerationHistory cut={cut} jobs={cut.imageJobs} kind="IMAGE" />
+          <GenerationHistory cut={cut} imageIndex={imageIndex} jobs={cut.imageJobs} kind="IMAGE" />
         </section>
 
         <section aria-labelledby={`cut-${cut.id}-videos`} className="generation-column">
@@ -304,7 +336,7 @@ export function CutCard({ cut, sceneId, generationMode }: CutCardProps) {
               );
             })}
           </div>
-          <GenerationHistory cut={cut} jobs={cut.videoJobs} kind="VIDEO" />
+          <GenerationHistory cut={cut} imageIndex={imageIndex} jobs={cut.videoJobs} kind="VIDEO" />
         </section>
       </div>
 

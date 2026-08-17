@@ -4,7 +4,7 @@ import { screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it } from "vitest";
 
-import { CutCard } from "./CutCard";
+import { CutCard, buildImageIndex } from "./CutCard";
 import type { GenerationMode, Scene } from "../../api/types";
 import {
   cutDetail,
@@ -13,6 +13,7 @@ import {
   cutWithoutImage,
   generationJob,
   sceneDetail,
+  sceneWithAnchorReference,
 } from "../../test/fixtures";
 import { createTestQueryClient, renderWithClient } from "../../test/render";
 import { server } from "../../test/server";
@@ -29,9 +30,11 @@ function deferredSignal() {
 
 function CutHarness({
   sceneId,
+  cutIndex = 0,
   generationMode = "MOCK",
 }: {
   sceneId: string;
+  cutIndex?: number;
   generationMode?: GenerationMode;
 }) {
   const { data: scene } = useQuery<Scene>({
@@ -43,54 +46,63 @@ function CutHarness({
   });
 
   if (!scene) return null;
-  return <CutCard cut={scene.cuts[0]} sceneId={sceneId} generationMode={generationMode} />;
+  return (
+    <CutCard
+      cut={scene.cuts[cutIndex]}
+      generationMode={generationMode}
+      imageIndex={buildImageIndex(scene.cuts)}
+      sceneId={sceneId}
+    />
+  );
 }
 
-function renderCut(cut = cutWithoutImage(), generationMode: GenerationMode = "MOCK") {
-  const scene = sceneDetail({ cuts: [cut] });
+function renderScene(
+  scene: Scene,
+  cutIndex = 0,
+  generationMode: GenerationMode = "MOCK",
+) {
   server.use(
     http.get(`${apiBase}/api/scenes/${scene.id}`, () => HttpResponse.json(scene)),
   );
   const queryClient = createTestQueryClient();
   queryClient.setQueryData(["scene", scene.id], scene);
   return renderWithClient(
-    <CutHarness sceneId={scene.id} generationMode={generationMode} />,
+    <CutHarness cutIndex={cutIndex} generationMode={generationMode} sceneId={scene.id} />,
     queryClient,
   );
 }
 
-describe("CutCard", () => {
-  it("shows the shot description, generation mode, and reference image of each job", () => {
-    const firstJob = generationJob({ id: "image-job-1", version: 1 });
-    const anchor = {
-      id: "image-1",
-      generationJobId: firstJob.id,
-      url: "/media/mock/cut-image.png",
-      inputPrompt: firstJob.prompt,
-      createdAt: "2026-08-14T12:00:00Z",
-    };
-    const secondJob = generationJob({
-      id: "image-job-2",
-      version: 2,
-      generationMode: "LIVE",
-      referenceImageId: anchor.id,
-    });
+function renderCut(cut = cutWithoutImage(), generationMode: GenerationMode = "MOCK") {
+  return renderScene(sceneDetail({ cuts: [cut] }), 0, generationMode);
+}
 
-    renderCut(
-      cutDetail({
-        shotDescription: "The two leads meet at the school gate",
-        imageJobs: [secondJob, firstJob],
-        images: [anchor],
-      }),
-    );
+describe("CutCard", () => {
+  it("names the cut that owns an anchor reference image instead of printing its id", () => {
+    renderScene(sceneWithAnchorReference(), 1);
+
+    expect(screen.getByText("The two leads share an umbrella")).toBeInTheDocument();
+    const job = screen.getByRole("article", { name: "Image generation v1" });
+    expect(within(job).getByText("LIVE")).toBeInTheDocument();
+    expect(within(job).getByText("Reference")).toBeInTheDocument();
+    expect(within(job).getByText("Cut 1 · Image v1")).toBeInTheDocument();
+    expect(within(job).queryByText("image-1")).not.toBeInTheDocument();
+  });
+
+  it("shows no reference on the anchor cut itself", () => {
+    renderScene(sceneWithAnchorReference(), 0);
 
     expect(screen.getByText("The two leads meet at the school gate")).toBeInTheDocument();
-    const referencedJob = screen.getByRole("article", { name: "Image generation v2" });
-    expect(within(referencedJob).getByText("LIVE")).toBeInTheDocument();
-    expect(within(referencedJob).getByText("Image v1")).toBeInTheDocument();
-    const anchorJob = screen.getByRole("article", { name: "Image generation v1" });
-    expect(within(anchorJob).getByText("MOCK")).toBeInTheDocument();
-    expect(within(anchorJob).queryByText("Reference")).not.toBeInTheDocument();
+    const job = screen.getByRole("article", { name: "Image generation v1" });
+    expect(within(job).getByText("MOCK")).toBeInTheDocument();
+    expect(within(job).queryByText("Reference")).not.toBeInTheDocument();
+  });
+
+  it("labels a same-cut source image without naming the cut", () => {
+    renderCut(cutWithFailedVideo({ attemptCount: 1, maxAttempts: 3 }));
+
+    const job = screen.getByRole("article", { name: "Video generation v1" });
+    expect(within(job).getByText("Source image")).toBeInTheDocument();
+    expect(within(job).getByText("Image v1")).toBeInTheDocument();
   });
 
   it("explains that a queued job is holding for the Cut 1 anchor image", () => {

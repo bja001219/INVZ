@@ -2,7 +2,14 @@ import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 
 import { api, errorMessage } from "../../api/client";
-import type { Cut, GenerationJob, GenerationKind, GenerationMode, MockScenario } from "../../api/types";
+import type {
+  Cut,
+  GenerationBatch,
+  GenerationJob,
+  GenerationKind,
+  GenerationMode,
+  MockScenario,
+} from "../../api/types";
 
 const ACTIVE_STATUSES = new Set(["QUEUED", "SUBMITTING", "PROCESSING", "RETRY_WAIT"]);
 
@@ -39,6 +46,45 @@ function summary(label: string, cuts: Cut[], kind: GenerationKind): string {
   if (active) parts.push(`${active} running`);
   if (failed) parts.push(`${failed} failed`);
   return parts.join(" · ");
+}
+
+/**
+ * Every AppError code `_create_batch` can catch from job creation. An unmapped code is shown
+ * verbatim, because a skip the UI cannot name is still a cut that did not start.
+ */
+const skipReasons = new Map<string, string>([
+  ["GENERATION_ALREADY_ACTIVE", "a generation is already running"],
+  ["SELECTED_IMAGE_REQUIRED", "no image is selected"],
+  ["ARTIFACT_MODE_MISMATCH", "the selected image came from the other mode"],
+  ["CUT_NOT_FOUND", "the cut no longer exists"],
+  ["REQUEST_VALIDATION_FAILED", "the request was rejected"],
+]);
+
+function SkippedCuts({ batch, cuts, label }: {
+  batch: GenerationBatch | undefined;
+  cuts: Cut[];
+  label: string;
+}) {
+  if (!batch?.skipped.length) return null;
+
+  const orderByCutId = new Map(cuts.map((cut) => [cut.id, cut.order]));
+  const cutName = (cutId: string) => {
+    const order = orderByCutId.get(cutId);
+    return order === undefined ? "An unlisted cut" : `Cut ${order}`;
+  };
+
+  return (
+    <div aria-label={`Skipped ${label} cuts`} className="batch-controls__row" role="status">
+      <p>{`${batch.skipped.length} of ${batch.requestedCount} cuts were skipped`}</p>
+      <ul className="selection-note">
+        {batch.skipped.map((skip) => (
+          <li key={skip.cutId}>
+            {`${cutName(skip.cutId)} · ${skipReasons.get(skip.reason) ?? skip.reason}`}
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
 }
 
 interface BatchControlsProps {
@@ -103,6 +149,7 @@ export function BatchControls({ sceneId, cuts, generationMode }: BatchControlsPr
         </button>
         <p role="status">{summary("Images", cuts, "IMAGE")}</p>
       </div>
+      <SkippedCuts batch={imageBatch.data} cuts={cuts} label="image" />
 
       <div className="batch-controls__row">
         <button
@@ -118,6 +165,7 @@ export function BatchControls({ sceneId, cuts, generationMode }: BatchControlsPr
         </button>
         <p role="status">{summary("Videos", cuts, "VIDEO")}</p>
       </div>
+      <SkippedCuts batch={videoBatch.data} cuts={cuts} label="video" />
 
       {!anyReadyForVideo && (
         <p className="selection-note">Generate images before batching videos.</p>

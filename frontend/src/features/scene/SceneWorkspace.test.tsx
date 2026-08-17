@@ -3,7 +3,7 @@ import { act, screen, within } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 
 import { SceneWorkspace } from "./SceneWorkspace";
-import { generationJob, sceneDetail } from "../../test/fixtures";
+import { generationJob, sceneDetail, sceneWithAnchorReference } from "../../test/fixtures";
 import { createTestQueryClient, renderWithClient } from "../../test/render";
 import { server } from "../../test/server";
 
@@ -29,6 +29,19 @@ describe("SceneWorkspace", () => {
       "Cut 6",
     ]);
     expect(screen.queryByLabelText(/Mock scenario/)).not.toBeInTheDocument();
+  });
+
+  it("resolves an anchor reference against the whole scene, not the cut showing it", async () => {
+    server.use(
+      http.get("http://localhost:8000/api/scenes/scene-1", () =>
+        HttpResponse.json(sceneWithAnchorReference()),
+      ),
+    );
+
+    renderWithClient(<SceneWorkspace sceneId="scene-1" generationMode="LIVE" />);
+
+    const cutThree = await screen.findByRole("region", { name: "Cut 3" });
+    expect(within(cutThree).getByText("Cut 1 · Image v1")).toBeInTheDocument();
   });
 
   it("polls at one second while active and stops after the job becomes terminal", async () => {

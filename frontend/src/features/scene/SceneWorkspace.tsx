@@ -2,7 +2,7 @@ import { useQuery } from "@tanstack/react-query";
 
 import { api, errorMessage } from "../../api/client";
 import type { GenerationMode, Scene } from "../../api/types";
-import { CutCard } from "../generations/CutCard";
+import { CutCard, buildImageIndex } from "../generations/CutCard";
 import { SequencePlayer } from "../player/SequencePlayer";
 import { BatchControls } from "./BatchControls";
 import { CharacterPanel } from "./CharacterPanel";
@@ -38,6 +38,7 @@ export function SceneWorkspace({ sceneId, generationMode }: SceneWorkspaceProps)
 
   const scene = sceneQuery.data;
   const orderedCuts = [...scene.cuts].sort((left, right) => left.order - right.order);
+  const imageIndex = buildImageIndex(orderedCuts);
 
   return (
     <section className="workspace" aria-labelledby="scene-title">
@@ -64,6 +65,7 @@ export function SceneWorkspace({ sceneId, generationMode }: SceneWorkspaceProps)
           <CutCard
             cut={cut}
             generationMode={generationMode}
+            imageIndex={imageIndex}
             key={cut.id}
             sceneId={sceneId}
           />

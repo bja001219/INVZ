@@ -128,6 +128,45 @@ export function cutWithFailedVideo(
   });
 }
 
+/**
+ * The scene anchor as the backend actually links it: Cut 1 owns the image and a later cut's job
+ * references it across the cut boundary, so a same-cut lookup cannot resolve the label.
+ */
+export function sceneWithAnchorReference(): Scene {
+  const anchorJob = generationJob({ id: "image-job-1", version: 1 });
+  const anchorImage: CutImage = {
+    id: "image-1",
+    generationJobId: anchorJob.id,
+    url: "/media/mock/cut-image.png",
+    inputPrompt: anchorJob.prompt,
+    createdAt: timestamp,
+  };
+  return sceneDetail({
+    cuts: [
+      cutDetail({
+        id: "cut-1",
+        order: 1,
+        selectedImageId: anchorImage.id,
+        imageJobs: [anchorJob],
+        images: [anchorImage],
+      }),
+      cutDetail({
+        id: "cut-3",
+        order: 3,
+        shotDescription: "The two leads share an umbrella",
+        imageJobs: [
+          generationJob({
+            id: "image-job-3",
+            version: 1,
+            generationMode: "LIVE",
+            referenceImageId: anchorImage.id,
+          }),
+        ],
+      }),
+    ],
+  });
+}
+
 export function cutWithImageAndVideoVersions(): Cut {
   const imageJobOne = generationJob();
   const imageJobTwo = generationJob({ id: "image-job-2", version: 2 });

@@ -1,5 +1,5 @@
 import { http, HttpResponse } from "msw";
-import { screen } from "@testing-library/react";
+import { screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 
@@ -149,6 +149,101 @@ describe("BatchControls", () => {
     await user.click(screen.getByRole("button", { name: "Generate all images" }));
 
     await vi.waitFor(() => expect(bodies).toEqual([{}]));
+  });
+
+  it("names every cut the batch skipped and why", async () => {
+    const user = userEvent.setup();
+    server.use(
+      http.post("http://localhost:8000/api/scenes/scene-1/images", () =>
+        HttpResponse.json(
+          {
+            id: "batch-2",
+            kind: "IMAGE",
+            requestedCount: 6,
+            createdJobIds: [],
+            skipped: [
+              { cutId: "cut-1", reason: "GENERATION_ALREADY_ACTIVE" },
+              { cutId: "cut-2", reason: "GENERATION_ALREADY_ACTIVE" },
+            ],
+          },
+          { status: 202 },
+        ),
+      ),
+    );
+
+    renderWithClient(
+      <BatchControls cuts={sixSucceeded()} generationMode="MOCK" sceneId="scene-1" />,
+    );
+    await user.click(screen.getByRole("button", { name: "Generate all images" }));
+
+    const skipped = await screen.findByRole("status", { name: "Skipped image cuts" });
+    expect(within(skipped).getByText("2 of 6 cuts were skipped")).toBeInTheDocument();
+    expect(
+      within(skipped).getByText("Cut 1 · a generation is already running"),
+    ).toBeInTheDocument();
+    expect(
+      within(skipped).getByText("Cut 2 · a generation is already running"),
+    ).toBeInTheDocument();
+  });
+
+  it("reports a skip it cannot fully interpret rather than dropping it", async () => {
+    const user = userEvent.setup();
+    server.use(
+      http.post("http://localhost:8000/api/scenes/scene-1/videos", () =>
+        HttpResponse.json(
+          {
+            id: "batch-3",
+            kind: "VIDEO",
+            requestedCount: 6,
+            createdJobIds: [],
+            skipped: [
+              { cutId: "cut-3", reason: "SELECTED_IMAGE_REQUIRED" },
+              { cutId: "cut-4", reason: "SOMETHING_NEW" },
+              { cutId: "cut-99", reason: "ARTIFACT_MODE_MISMATCH" },
+            ],
+          },
+          { status: 202 },
+        ),
+      ),
+    );
+
+    renderWithClient(
+      <BatchControls cuts={sixSucceeded()} generationMode="MOCK" sceneId="scene-1" />,
+    );
+    await user.click(screen.getByRole("button", { name: "Generate all videos" }));
+
+    const skipped = await screen.findByRole("status", { name: "Skipped video cuts" });
+    expect(within(skipped).getByText("Cut 3 · no image is selected")).toBeInTheDocument();
+    expect(within(skipped).getByText("Cut 4 · SOMETHING_NEW")).toBeInTheDocument();
+    expect(
+      within(skipped).getByText("An unlisted cut · the selected image came from the other mode"),
+    ).toBeInTheDocument();
+    expect(screen.queryByRole("status", { name: "Skipped image cuts" })).not.toBeInTheDocument();
+  });
+
+  it("says nothing about skipped cuts when every cut started", async () => {
+    const user = userEvent.setup();
+    server.use(
+      http.post("http://localhost:8000/api/scenes/scene-1/images", () =>
+        HttpResponse.json({
+          id: "batch-1",
+          kind: "IMAGE",
+          requestedCount: 6,
+          createdJobIds: ["job-1"],
+          skipped: [],
+        }),
+      ),
+    );
+
+    renderWithClient(
+      <BatchControls cuts={sixSucceeded()} generationMode="MOCK" sceneId="scene-1" />,
+    );
+    await user.click(screen.getByRole("button", { name: "Generate all images" }));
+
+    await vi.waitFor(() =>
+      expect(screen.getByRole("button", { name: "Generate all images" })).toBeEnabled(),
+    );
+    expect(screen.queryByRole("status", { name: "Skipped image cuts" })).not.toBeInTheDocument();
   });
 
   it("blocks the video batch until at least one image is selected", () => {
