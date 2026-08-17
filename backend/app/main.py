@@ -168,6 +168,8 @@ def create_app(settings: Settings, *, generation_worker: GenerationWorker | None
         [
             settings.openai_api_key.get_secret_value(),
             settings.kie_api_key.get_secret_value(),
+            # The callback URL carries this as a query token, so it lands in access logs.
+            webhook_secret,
         ]
     )
 
@@ -275,8 +277,10 @@ def create_app(settings: Settings, *, generation_worker: GenerationWorker | None
         payload: dict[str, Any],
         session: Annotated[AsyncSession, Depends(get_app_session)],
         x_webhook_secret: Annotated[str | None, Header()] = None,
+        # Live providers cannot be told to send a custom header; they only get a URL back.
+        token: str | None = None,
     ) -> WebhookAck:
-        verify_webhook_secret(webhook_secret, x_webhook_secret)
+        verify_webhook_secret(webhook_secret, x_webhook_secret, token)
         return await apply_webhook(session, generation_worker, payload)
 
     @application.post(

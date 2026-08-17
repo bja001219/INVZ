@@ -24,14 +24,25 @@ from app.worker import GenerationWorker
 _IGNORED = WebhookAck(status="ignored")
 
 
-def verify_webhook_secret(configured: str | None, provided: str | None) -> None:
+def verify_webhook_secret(configured: str | None, *provided: str | None) -> None:
+    """Accept the secret from any of the channels a provider can actually use.
+
+    Kie is handed one callback URL and nothing else, so a header-only check makes the Live
+    webhook unsatisfiable: every delivery 401s and the provider retries forever. The secret
+    therefore also travels as a query token in the callback URL we register. Both candidates
+    are compared in constant time and the failure never says which one was tried.
+    """
     if not configured:
         raise AppError(
             status_code=503,
             code="WEBHOOK_DISABLED",
             message="Webhook delivery is not configured",
         )
-    if provided is None or not secrets.compare_digest(configured, provided):
+    matched = False
+    for candidate in provided:
+        if candidate is not None and secrets.compare_digest(configured, candidate):
+            matched = True
+    if not matched:
         raise AppError(
             status_code=401,
             code="WEBHOOK_UNAUTHORIZED",

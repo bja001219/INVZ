@@ -112,6 +112,43 @@ async def test_webhook_rejects_a_missing_or_wrong_secret(webhook_app) -> None:
     assert (await reload_job(factory, job.id)).status == JobStatus.PROCESSING
 
 
+async def test_webhook_accepts_the_secret_as_a_query_token(webhook_app) -> None:
+    """A real provider cannot be told to send a custom header.
+
+    Kie is handed one callback URL and nothing else, so header-only authentication makes the
+    Live webhook impossible to satisfy: every delivery would 401 and the provider would retry
+    forever. The secret has to be able to travel in the URL we give it.
+    """
+    client, factory, _ = webhook_app
+    job = await seed_processing_job(factory, task_id="task-token")
+
+    response = await client.post(
+        f"/api/webhooks/kie?token={WEBHOOK_SECRET}",
+        json=success_payload("task-token"),
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {"status": "applied"}
+    assert (await reload_job(factory, job.id)).status == JobStatus.SUCCEEDED
+
+
+async def test_webhook_rejects_a_wrong_query_token(webhook_app) -> None:
+    client, factory, _ = webhook_app
+    job = await seed_processing_job(factory, task_id="task-token")
+
+    response = await client.post(
+        "/api/webhooks/kie?token=nope",
+        json=success_payload("task-token"),
+    )
+
+    assert response.status_code == 401
+    assert response.json() == {
+        "code": "WEBHOOK_UNAUTHORIZED",
+        "message": "Webhook credentials are invalid",
+    }
+    assert (await reload_job(factory, job.id)).status == JobStatus.PROCESSING
+
+
 async def test_webhook_is_disabled_when_no_secret_is_configured(client) -> None:
     response = await client.post(
         "/api/webhooks/kie",

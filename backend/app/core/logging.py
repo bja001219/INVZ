@@ -23,14 +23,44 @@ class SecretRedactionFilter(logging.Filter):
             exception_text = logging.Formatter().formatException(record.exc_info)
             record.exc_text = self._redact(exception_text)
             record.exc_info = None
+        elif record.exc_text:
+            # Another instance already rendered the traceback and cleared exc_info. Redacting
+            # what it left behind is what makes two redactors compose: the process-wide one
+            # knows the configured keys, a handler-local one may know others.
+            record.exc_text = self._redact(record.exc_text)
         if record.stack_info:
             record.stack_info = self._redact(record.stack_info)
         return True
 
 
+_BASE_RECORD_FACTORY = logging.getLogRecordFactory()
+
+
 def configure_secret_redaction(settings_secrets: Iterable[str]) -> None:
+    """Redact secrets from every log record in the process, whoever emits it.
+
+    This deliberately does not attach the filter to a logger. A filter on the root logger is
+    only consulted for records logged directly to root: records that a child logger emits are
+    passed to ancestor *handlers*, never to ancestor filters. Uvicorn gives `uvicorn.error`
+    and `uvicorn.access` their own handlers with `propagate = False` and leaves root without
+    any, so a root-level filter sees nothing Uvicorn writes — including the access line for a
+    webhook callback, which carries the shared secret as a query token.
+
+    Replacing the record factory catches every logger, every handler, and any handler added
+    after startup, which is the only shape that holds under `--reload` as well.
+    """
     redaction_filter = SecretRedactionFilter(settings_secrets)
-    root_logger = logging.getLogger()
-    root_logger.addFilter(redaction_filter)
-    for handler in root_logger.handlers:
-        handler.addFilter(redaction_filter)
+
+    def factory(*args: object, **kwargs: object) -> logging.LogRecord:
+        # Chained off the factory captured at import, never off the current one, so repeated
+        # configuration replaces the redactor instead of stacking copies of it.
+        record = _BASE_RECORD_FACTORY(*args, **kwargs)
+        redaction_filter.filter(record)
+        return record
+
+    logging.setLogRecordFactory(factory)
+
+
+def reset_secret_redaction() -> None:
+    """Restore unredacted logging. Exists so tests can prove the redaction is what redacts."""
+    logging.setLogRecordFactory(_BASE_RECORD_FACTORY)

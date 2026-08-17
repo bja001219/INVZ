@@ -16,7 +16,11 @@ from sqlalchemy.exc import IntegrityError, SAWarning
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from app.core.config import Settings
-from app.core.logging import SecretRedactionFilter
+from app.core.logging import (
+    SecretRedactionFilter,
+    configure_secret_redaction,
+    reset_secret_redaction,
+)
 from app.main import create_app
 from app.models import Base, Cut, GenerationJob, GenerationKind, JobStatus, Scene
 
@@ -186,6 +190,61 @@ def test_log_filter_masks_exception_tracebacks() -> None:
     assert "openai-secret" not in rendered
     assert "kie-secret" not in rendered
     assert "Bearer " not in rendered
+
+
+def uvicorn_shaped_logger(name: str) -> tuple[logging.Logger, StringIO, logging.Handler]:
+    """A logger configured the way Uvicorn configures its own: private handler, no propagation.
+
+    Records logged here never reach the root logger, so a filter installed on root alone --
+    which is what the app used to do -- redacts nothing that Uvicorn writes.
+    """
+    output = StringIO()
+    handler = logging.StreamHandler(output)
+    logger = logging.getLogger(name)
+    logger.addHandler(handler)
+    logger.propagate = False
+    logger.setLevel(logging.INFO)
+    return logger, output, handler
+
+
+def test_secret_redaction_reaches_loggers_that_bypass_the_root_handlers() -> None:
+    logger, output, handler = uvicorn_shaped_logger("test.uvicorn.access")
+    try:
+        configure_secret_redaction(["openai-secret", "kie-secret"])
+        logger.info('GET /x?token=%s "Authorization: Bearer kie-secret"', "openai-secret")
+    finally:
+        reset_secret_redaction()
+        logger.removeHandler(handler)
+
+    rendered = output.getvalue()
+    assert "openai-secret" not in rendered
+    assert "kie-secret" not in rendered
+    assert "[REDACTED]" in rendered
+
+
+def test_secret_redaction_reaches_handlers_installed_after_configuration() -> None:
+    """Uvicorn's --reload worker and any late logging setup add handlers after startup."""
+    try:
+        configure_secret_redaction(["openai-secret"])
+        logger, output, handler = uvicorn_shaped_logger("test.late.handler")
+        logger.info("leaked openai-secret")
+    finally:
+        reset_secret_redaction()
+        logger.removeHandler(handler)
+
+    assert "openai-secret" not in output.getvalue()
+
+
+def test_resetting_redaction_restores_plain_logging() -> None:
+    configure_secret_redaction(["openai-secret"])
+    reset_secret_redaction()
+    logger, output, handler = uvicorn_shaped_logger("test.reset")
+    try:
+        logger.info("openai-secret")
+    finally:
+        logger.removeHandler(handler)
+
+    assert "openai-secret" in output.getvalue()
 
 
 async def test_cors_allows_only_frontend_origin(client) -> None:
