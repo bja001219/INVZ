@@ -24,10 +24,14 @@ are redacted from logs together with any `Authorization: Bearer …` header.
 ## Quick start — Mock mode (no API keys)
 
 ```bash
+cp .env.example .env      # compose reads this; WEBHOOK_SECRET enables the callback route
 docker compose up --build -d
 # open http://localhost:5173
 docker compose down
 ```
+
+Without a `.env` the stack still runs; only `POST /api/webhooks/kie` stays disabled, so the
+`SUCCEED_VIA_WEBHOOK` scenario is the one thing that cannot complete.
 
 Compose defaults to `GENERATION_MODE=mock`, requires no API key, stores SQLite in the named
 volume `backend-data`, and starts the frontend only after `GET /health` reports the backend
@@ -92,7 +96,7 @@ Copy [`.env.example`](.env.example). It contains names and non-secret defaults o
 | `RETRY_BASE_DELAY_SEC` | `1` | Base of the `base * 2^(attempt-1)` backoff |
 | `PROVIDER_POLL_INTERVAL_SEC` | `1` | Worker idle interval and next-poll delay |
 | `GENERATION_ATTEMPT_TIMEOUT_SEC` | `120` | Deadline for one accepted provider task |
-| `WEBHOOK_SECRET` | *(empty)* | Shared secret for `POST /api/webhooks/kie`; empty disables the route |
+| `WEBHOOK_SECRET` | *(empty)* | Shared secret for `POST /api/webhooks/kie`; empty disables the route. Compose reads it from the root `.env` rather than carrying a literal |
 | `WEBHOOK_PUBLIC_URL` | *(empty)* | Public callback URL sent to Kie as `callBackUrl` |
 | `SELF_BASE_URL` | `http://127.0.0.1:8000` | Where Mock mode posts its own simulated callbacks |
 | `MOCK_WEBHOOK_DELAY_SEC` | `1` | Simulated provider latency before a Mock callback |
@@ -330,6 +334,7 @@ npm run build
 
 # Compose
 cd ..
+cp .env.example .env
 docker compose config
 docker compose up --build -d
 docker compose logs backend --no-color

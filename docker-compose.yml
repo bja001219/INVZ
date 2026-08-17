@@ -16,7 +16,9 @@ services:
       PROVIDER_POLL_INTERVAL_SEC: "1"
       GENERATION_ATTEMPT_TIMEOUT_SEC: "120"
       # Enables the Mock webhook path; Live also needs a reachable WEBHOOK_PUBLIC_URL.
-      WEBHOOK_SECRET: local-demo-webhook-secret
+      # Taken from the environment (compose reads the root `.env`) so no secret-shaped literal
+      # is committed. Empty leaves POST /api/webhooks/kie disabled.
+      WEBHOOK_SECRET: ${WEBHOOK_SECRET:-}
       SELF_BASE_URL: http://127.0.0.1:8000
       MOCK_WEBHOOK_DELAY_SEC: "1"
     ports:
