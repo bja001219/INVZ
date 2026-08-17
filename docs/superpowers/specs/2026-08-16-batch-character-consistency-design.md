@@ -60,7 +60,9 @@ denormalized 상태 컬럼은 worker 전이마다 동기화 대상이 하나 더
 ## 4. 캐릭터 일관성
 
 ### 4.1 1단계 — 캐릭터 시트
-Scene 생성 시 LLM이 등장인물 2명 이상에 대해 다음을 산출한다.
+Scene 생성 시 LLM이 등장인물에 대해 다음을 산출한다. 시스템 지시는 2~4명을 요구하지만,
+**스키마 하한은 1명이다**(2026-08-17 개정). 요구사항은 "cut 간 동일 인물 유지"이지 인원수가
+아니며, 1인 주인공 프롬프트가 scene 생성 자체를 502로 실패시키면 안 되기 때문이다.
 
 `name, role, ageRange, hairColor, hairStyle, outfit, build, faceImpression, signatureProp`
 

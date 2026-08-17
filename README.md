@@ -19,7 +19,13 @@ shared LAN, or production.
 
 `OPENAI_API_KEY` and `KIE_API_KEY` are read only from the backend environment. They are
 never returned by an API, never sent to the frontend, never written to a tracked file, and
-are redacted from logs together with any `Authorization: Bearer …` header.
+are redacted from logs together with `WEBHOOK_SECRET` and any `Authorization: Bearer …` header.
+
+Redaction replaces the process log record factory rather than adding a filter to a logger. A
+filter on the root logger is consulted only for records logged directly to root; records from a
+child logger reach ancestor *handlers*, never ancestor filters. Uvicorn gives its own loggers
+private handlers with `propagate = False` and leaves root without any, so a root-level filter
+would never see the access line that carries the webhook token.
 
 ## Quick start — Mock mode (no API keys)
 
@@ -97,7 +103,7 @@ Copy [`.env.example`](.env.example). It contains names and non-secret defaults o
 | `PROVIDER_POLL_INTERVAL_SEC` | `1` | Worker idle interval and next-poll delay |
 | `GENERATION_ATTEMPT_TIMEOUT_SEC` | `120` | Deadline for one accepted provider task |
 | `WEBHOOK_SECRET` | *(empty)* | Shared secret for `POST /api/webhooks/kie`; empty disables the route. Compose reads it from the root `.env` rather than carrying a literal |
-| `WEBHOOK_PUBLIC_URL` | *(empty)* | Public callback URL sent to Kie as `callBackUrl` |
+| `WEBHOOK_PUBLIC_URL` | *(empty)* | Public callback URL sent to Kie as `callBackUrl`; must end in `?token=<WEBHOOK_SECRET>` or every Live callback is rejected |
 | `SELF_BASE_URL` | `http://127.0.0.1:8000` | Where Mock mode posts its own simulated callbacks |
 | `MOCK_WEBHOOK_DELAY_SEC` | `1` | Simulated provider latency before a Mock callback |
 | `VITE_API_BASE_URL` | `http://localhost:8000` | Frontend build-time backend URL (public, not a secret) |
@@ -175,6 +181,21 @@ A transient failure while polling an already-accepted task reschedules the poll 
 not consume an attempt. Mock retry behaviour is decided by the persisted `attempt_count`,
 never by an in-memory counter.
 
+Scene drafting adds a fourth class. When the model answers in a shape the schema rejects, that
+is a **retryable** `SchemaProviderError`, not a permanent failure: nothing was created upstream,
+so re-asking duplicates nothing, and a model that got the shape wrong once usually gets it right
+next time. Retrying only transport errors would have spent the budget on the rarer problem.
+Exhausting the attempts reports `SCENE_SCHEMA_INVALID` rather than an outage code, so the two
+causes stay distinguishable.
+
+### Cross-mode artifacts
+
+An artifact is only usable by the provider that produced it: a Mock image is a path this app
+serves, a Live image is a URL on the provider's CDN. Requesting a Live video over a Mock image
+therefore returns `409 ARTIFACT_MODE_MISMATCH` at job creation, instead of letting the request
+builder fail anonymously inside the provider three steps later. The guard matters because
+switching modes mid-scene is the natural way to demonstrate the runtime switch.
+
 ### Batch generation
 
 `POST /api/scenes/{id}/images` and `.../videos` enqueue one job per Cut in a single request and
@@ -199,7 +220,9 @@ row, so the displayed counts can never disagree with the state machine.
 Cuts drift apart when each prompt is written independently, so the model does not write the
 final prompts at all. Scene creation produces:
 
-1. a **character sheet** — two to four recurring characters, each described on fixed axes
+1. a **character sheet** — the model is asked for two to four recurring characters, each
+   described on fixed axes; the schema accepts one to four so a single-protagonist prompt
+   produces a scene instead of a 502
    (hair colour, hair style, outfit, build, face impression, signature prop);
 2. per-Cut **shot descriptions** that state framing and action and are explicitly forbidden
    from restating appearance.
@@ -244,10 +267,21 @@ Mock provider. The mode lives in process memory, so a restart returns to `GENERA
 
 ### Webhook
 
-`POST /api/webhooks/kie` is enabled only when `WEBHOOK_SECRET` is set, and the `X-Webhook-Secret`
-header is compared in constant time. The payload is normalized by the same function polling uses
-and applied by the same worker transition, so a callback and a poll of the same task produce
-identical results.
+`POST /api/webhooks/kie` is enabled only when `WEBHOOK_SECRET` is set. The payload is normalized
+by the same function polling uses and applied by the same worker transition, so a callback and a
+poll of the same task produce identical results.
+
+The secret may arrive either as the `X-Webhook-Secret` header or as a `?token=` query
+parameter, both compared in constant time. Two channels rather than one because **a provider
+cannot be told to send a custom header** — Kie receives a callback URL and nothing else. So Live
+callbacks carry the secret in the URL:
+
+```dotenv
+WEBHOOK_PUBLIC_URL=https://<your-tunnel>/api/webhooks/kie?token=<WEBHOOK_SECRET>
+```
+
+That token then appears in access logs, which is why `WEBHOOK_SECRET` is registered for log
+redaction alongside the two API keys.
 
 Idempotency comes from the transition itself: every branch re-reads the job inside its
 transaction and does nothing unless it is still `PROCESSING`. A duplicate delivery, or a poll
