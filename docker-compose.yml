@@ -7,20 +7,38 @@ services:
     build:
       context: ./backend
     environment:
-      GENERATION_MODE: mock
+      # Every tunable below is interpolated from the environment (compose reads the root `.env`)
+      # so that no literal value is committed and none is trapped in this file. Each `:-`
+      # fallback is the documented default, so a reviewer with no `.env` and no exported
+      # variables still gets the same working Mock stack this file used to hardcode.
+      GENERATION_MODE: ${GENERATION_MODE:-mock}
+      # Empty is the no-keys default: the backend constructs no Live provider and
+      # `GET /api/config` reports `liveAvailable: false`. Supplying either key here is the only
+      # way the Live toggle becomes selectable under compose — enumerating this environment
+      # literally is what previously pinned `liveAvailable` to false no matter what the
+      # reviewer put in `.env`.
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      KIE_API_KEY: ${KIE_API_KEY:-}
+      # Deliberately not overridable: these three describe the compose topology, not a
+      # preference. The database URL has to stay inside the `backend-data` mount or SQLite
+      # writes to the container layer and the demo data disappears on `down`; the CORS origin
+      # and the Mock self-callback address have to match the ports published below.
       DATABASE_URL: sqlite+aiosqlite:///./data/app-mock.db
       FRONTEND_ORIGIN: http://localhost:5173
-      GENERATION_MAX_ATTEMPTS: "3"
-      GENERATION_CONCURRENCY: "3"
-      RETRY_BASE_DELAY_SEC: "1"
-      PROVIDER_POLL_INTERVAL_SEC: "1"
-      GENERATION_ATTEMPT_TIMEOUT_SEC: "120"
-      # Enables the Mock webhook path; Live also needs a reachable WEBHOOK_PUBLIC_URL.
-      # Taken from the environment (compose reads the root `.env`) so no secret-shaped literal
-      # is committed. Empty leaves POST /api/webhooks/kie disabled.
-      WEBHOOK_SECRET: ${WEBHOOK_SECRET:-}
       SELF_BASE_URL: http://127.0.0.1:8000
-      MOCK_WEBHOOK_DELAY_SEC: "1"
+      GENERATION_MAX_ATTEMPTS: "${GENERATION_MAX_ATTEMPTS:-3}"
+      GENERATION_CONCURRENCY: "${GENERATION_CONCURRENCY:-3}"
+      RETRY_BASE_DELAY_SEC: "${RETRY_BASE_DELAY_SEC:-1}"
+      PROVIDER_POLL_INTERVAL_SEC: "${PROVIDER_POLL_INTERVAL_SEC:-1}"
+      # 300s, because real kling-2.6 latency is ~3.5-4 minutes. The previous 120s deadline
+      # expired while the provider task was still running, and the retry that followed was
+      # billed for a video the first attempt went on to produce.
+      GENERATION_ATTEMPT_TIMEOUT_SEC: "${GENERATION_ATTEMPT_TIMEOUT_SEC:-300}"
+      # Enables the Mock webhook path; Live also needs a reachable WEBHOOK_PUBLIC_URL.
+      # Empty leaves POST /api/webhooks/kie disabled.
+      WEBHOOK_SECRET: ${WEBHOOK_SECRET:-}
+      WEBHOOK_PUBLIC_URL: ${WEBHOOK_PUBLIC_URL:-}
+      MOCK_WEBHOOK_DELAY_SEC: "${MOCK_WEBHOOK_DELAY_SEC:-1}"
     ports:
       - "127.0.0.1:8000:8000"
     volumes:
@@ -30,7 +48,7 @@ services:
     build:
       context: ./frontend
       args:
-        VITE_API_BASE_URL: http://localhost:8000
+        VITE_API_BASE_URL: ${VITE_API_BASE_URL:-http://localhost:8000}
     ports:
       - "127.0.0.1:5173:5173"
     depends_on:

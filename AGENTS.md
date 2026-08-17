@@ -15,14 +15,16 @@ coroutine. There is no broker, no object storage, no authentication — the app 
 design, and that constraint is what makes the simple designs below correct.
 
 Read `README.md` for the architecture and `docs/superpowers/specs/` for the design decisions
-behind it before proposing a change to either.
+behind it before proposing a change to either. `README.md` is written in Korean because its
+reader is a human reviewer; this file stays in English because its reader is a tool.
 
 ## Non-negotiables
 
 **API keys live in the backend environment and nowhere else.** Never return one from an
 endpoint, never pass one to the frontend, never write one to a tracked file, never put one in a
 log line. `frontend/` may read `VITE_API_BASE_URL` and nothing else. Before committing, the
-secret scan in the Verification section of `README.md` must print nothing.
+secret scan in the 검증 (Verification) section of `README.md` must print nothing. It is `git grep`,
+so it proves nothing was *committed*; an untracked `.env` holding a real key is invisible to it.
 
 **Tests come before implementation.** Write the focused failing test, run it, read the failure
 and confirm it is the failure you meant to cause, then write the smallest code that passes, then
@@ -48,14 +50,19 @@ pure function because the worker enforces it and the scene response explains it.
 implementations of one rule drift; that is how a cut generated outside a batch silently skipped
 the anchor.
 
-**Claiming is serial, provider calls are concurrent.** `GenerationWorker.run_once()` claims up
-to `GENERATION_CONCURRENCY` jobs inside one transaction, then fans out only the network calls.
-Parallelising the claim would make double-claiming possible again, and no current test would
-notice — if you change it, add that test first.
+**Claiming is serial, provider calls are concurrent.** `GenerationWorker.run_once()` counts the
+jobs already `SUBMITTING` or `PROCESSING` and claims at most the unused share of
+`GENERATION_CONCURRENCY` inside that same transaction, then fans out only the network calls. The
+setting bounds simultaneous provider work, not claims per tick: counting per tick let a six-cut
+batch add one more live provider task on every tick. Parallelising the claim would make
+double-claiming possible again, and no current test would notice — if you change it, add that
+test first.
 
-**Every state transition re-reads the job inside its transaction and bails unless it is still
-`PROCESSING`.** This is the whole of the webhook/polling idempotency argument. A branch that
-skips the re-read creates duplicate artifacts under a race that happens in practice.
+**Every state transition re-reads the job inside its transaction and bails unless it is still in
+the status the transition expects** — `PROCESSING` for an applied result or a poll failure,
+`SUBMITTING` for a submission failure. This is the whole of the webhook/polling idempotency
+argument, and it only holds if *every* branch carries the guard: the two failure branches of
+`apply_external_result` once lacked it, which is exactly the race that duplicates artifacts.
 
 **Prompt composition is a pure function of stored data.** The model supplies a character sheet
 and per-cut shot descriptions; `app/prompting.py` splices them into a fixed template. Character
@@ -67,12 +74,15 @@ Live image is a URL on the provider's CDN. Crossing them is refused at job creat
 `409 ARTIFACT_MODE_MISMATCH`, not left to fail anonymously inside the request builder.
 
 **Errors use one envelope.** `{"code": "STABLE_CODE", "message": "user-safe text"}` with no
-stack trace, provider body, or request header. New codes go in the README table.
+stack trace, provider body, or request header. A new code goes in the error-code tables under
+`README.md` § 설계 → 오류 코드: the first table for codes that leave over HTTP, the second for
+codes that only land on a job as `lastErrorCode`.
 
 ## Conventions
 
-- Python 3.13, FastAPI, SQLAlchemy 2.x async, Alembic, pytest. `ruff` and `mypy --strict` must
-  both pass.
+- Python 3.12, FastAPI, SQLAlchemy 2.x async, Alembic, pytest. `ruff` and `mypy --strict` must
+  both pass. `requires-python`, the ruff target, the mypy `python_version`, `backend/Dockerfile`,
+  and CI all say 3.12; change them together or not at all.
 - React 19 + TypeScript + Vite + TanStack Query + Vitest + Playwright. `eslint`, `tsc`, and the
   build must pass.
 - Schema changes need an Alembic migration, and the migration must survive
