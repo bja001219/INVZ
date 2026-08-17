@@ -10,6 +10,23 @@
 
 **Spec:** `docs/superpowers/specs/2026-08-14-prompt-to-animation-design.md`
 
+## Status — completed 2026-08-16
+
+All tasks are implemented and committed, `4ce25e5` through `c9646fe`.
+
+Two of the Global Constraints below were **deliberately superseded** on 2026-08-16 once the
+assignment text confirmed the excluded features were required. Read them as history, not as
+current rules; `docs/superpowers/plans/2026-08-16-batch-character-consistency.md` is the plan
+that replaced them.
+
+- "External generation completion uses Polling only; do not add callback endpoints" — a webhook
+  now shares the polling state machine.
+- "`GENERATION_MODE` is read once at startup; do not add a runtime mode API that mutates state"
+  — `PUT /api/config` switches the mode at runtime, and each job follows its own snapshot.
+- "The generation worker handles at most one due job per `run_once()`" — the worker now claims
+  up to `GENERATION_CONCURRENCY` jobs per tick.
+- "Do not add Batch" — scene-level batch endpoints exist.
+
 ## Global Constraints
 
 - Scene output is exactly six Cuts and every Cut has `durationSec=5` (`REQ-01`, `REQ-02`).
@@ -120,7 +137,7 @@ The backend intentionally keeps one ORM module and one API schema module. `scene
 - Consumes: no application interfaces.
 - Produces: `Settings`, `Base`, `async_session_factory`, ORM models, `AppError`, `Clock`, stable exception handlers, FastAPI `app`, `/health`, `/api/config`, and `/media/mock`.
 
-- [ ] **Step 1: Create repository safety files before Git initialization**
+- [x] **Step 1: Create repository safety files before Git initialization**
 
 Create `.gitignore` with these entries:
 
@@ -163,7 +180,7 @@ Create README with this first paragraph:
 > Local evaluation only. This app has no authentication and must not be exposed to the public internet or an untrusted LAN. Docker Compose publishes ports on `127.0.0.1` only.
 ```
 
-- [ ] **Step 2: Create backend package and initialize Git**
+- [x] **Step 2: Create backend package and initialize Git**
 
 Create `backend/pyproject.toml` with FastAPI, Uvicorn, Pydantic Settings, SQLAlchemy async, aiosqlite, Alembic, HTTPX, OpenAI, pytest, pytest-asyncio, pytest-cov, pytest-socket, respx, Ruff, and mypy. Configure pytest `asyncio_mode = "auto"`; pytest-socket blocks every external host. On Windows, allow only `127.0.0.1` because asyncio uses it for its internal socketpair, and add a regression test proving a documentation-only external address is rejected. Application HTTP tests still use ASGI transport or routes registered through respx.
 
@@ -174,7 +191,7 @@ git init
 git branch -M main
 ```
 
-- [ ] **Step 3: Write failing Settings, CORS, media, and error contract tests**
+- [x] **Step 3: Write failing Settings, CORS, media, and error contract tests**
 
 ```python
 async def test_config_exposes_mode_without_secrets(client):
@@ -221,13 +238,13 @@ async def test_missing_resource_uses_stable_error(client):
     assert response.json() == {"code": "ROUTE_NOT_FOUND", "message": "Route not found"}
 ```
 
-- [ ] **Step 4: Run the focused tests and observe failure**
+- [x] **Step 4: Run the focused tests and observe failure**
 
 Run: `cd backend && python -m pytest tests/test_core.py -v`
 
 Expected: collection fails because `app.main`, settings, models, and fixtures do not exist.
 
-- [ ] **Step 5: Implement settings, schema, app wiring, CORS, errors, and media mount**
+- [x] **Step 5: Implement settings, schema, app wiring, CORS, errors, and media mount**
 
 Use `SecretStr` for both API keys. Validate Live mode in Settings:
 
@@ -263,7 +280,7 @@ WHERE status IN ('QUEUED', 'SUBMITTING', 'PROCESSING', 'RETRY_WAIT');
 
 Register handlers that serialize `AppError`, request validation, and missing resources as `{code,message}` without exception details.
 
-- [ ] **Step 6: Run migration and foundation verification**
+- [x] **Step 6: Run migration and foundation verification**
 
 Run:
 
@@ -277,7 +294,7 @@ mypy app
 
 Expected: migration succeeds; core tests, lint, and types pass.
 
-- [ ] **Step 7: Commit the safe foundation**
+- [x] **Step 7: Commit the safe foundation**
 
 ```bash
 git add .gitignore .env.example README.md backend
@@ -304,7 +321,7 @@ git commit -m "chore: establish secure local MVP foundation"
 - Consumes: `Settings`, `Scene`, `Cut`, async DB session, `AppError`.
 - Produces: `SceneDraft`, `CutDraft`, `SceneProvider.generate(prompt)`, `create_scene`, `get_scene`, `POST /api/scenes`, and `GET /api/scenes/{scene_id}`.
 
-- [ ] **Step 1: Write failing Scene schema and transaction tests**
+- [x] **Step 1: Write failing Scene schema and transaction tests**
 
 ```python
 def test_scene_draft_requires_ordered_six_five_second_cuts(valid_scene_payload):
@@ -330,13 +347,13 @@ async def test_missing_scene_uses_stable_error(client):
     assert response.json() == {"code": "SCENE_NOT_FOUND", "message": "Scene not found"}
 ```
 
-- [ ] **Step 2: Run Scene tests and observe missing schema/service failures**
+- [x] **Step 2: Run Scene tests and observe missing schema/service failures**
 
 Run: `cd backend && python -m pytest tests/test_scenes.py -v`
 
 Expected: FAIL because Scene schemas and routes are absent.
 
-- [ ] **Step 3: Implement strict schemas, Mock provider, and transactional Scene creation**
+- [x] **Step 3: Implement strict schemas, Mock provider, and transactional Scene creation**
 
 ```python
 class CutDraft(BaseModel):
@@ -359,7 +376,7 @@ class SceneDraft(BaseModel):
 
 Implement `MockSceneProvider` with deterministic six-Cut output. Persist Scene and Cuts inside one `session.begin()` transaction. Retry Scene generation only for typed `RetryableProviderError`; use injected `Clock.sleep()` and `base * 2**retry_index`.
 
-- [ ] **Step 4: Write failing OpenAI HTTP request/response contract tests**
+- [x] **Step 4: Write failing OpenAI HTTP request/response contract tests**
 
 Register only `POST https://api.openai.com/v1/responses` through respx and assert the captured JSON:
 
@@ -389,11 +406,11 @@ async def test_openai_malformed_structured_output_is_permanent(provider, respx_m
         await provider.generate("moon voyage")
 ```
 
-- [ ] **Step 5: Implement OpenAI provider with explicit timeout and SDK retries disabled**
+- [x] **Step 5: Implement OpenAI provider with explicit timeout and SDK retries disabled**
 
 Construct the injected client with `max_retries=0` and explicit HTTPX connect/read timeouts. Use the Responses API structured output schema derived from `SceneDraft`. Normalize 429/5xx/connect errors as retryable, 400/401/403/422 and schema errors as permanent. Never include response bodies or authorization headers in `AppError`.
 
-- [ ] **Step 6: Run Scene and OpenAI suites**
+- [x] **Step 6: Run Scene and OpenAI suites**
 
 Run:
 
@@ -405,7 +422,7 @@ ruff check app/scenes.py app/providers tests/test_scenes.py tests/providers/test
 
 Expected: all tests pass and respx reports no unregistered network calls.
 
-- [ ] **Step 7: Commit Scene creation**
+- [x] **Step 7: Commit Scene creation**
 
 ```bash
 git add backend/app backend/tests
@@ -429,7 +446,7 @@ git commit -m "feat: create validated scenes from mock or OpenAI"
 - Consumes: Cut/Job/artifact ORM models, startup mode, async DB session.
 - Produces: `create_image_job`, `create_video_job`, `select_image`, `select_video`, generation routes, and enriched Scene detail.
 
-- [ ] **Step 1: Write failing active-job, versioning, and lineage tests**
+- [x] **Step 1: Write failing active-job, versioning, and lineage tests**
 
 ```python
 async def test_active_job_blocks_regeneration(session, cut):
@@ -449,7 +466,7 @@ async def test_video_captures_selected_source_image(session, cut, selected_image
     assert job.prompt == cut.video_prompt
 ```
 
-- [ ] **Step 2: Write failing concurrent-create and selection-consistency tests**
+- [x] **Step 2: Write failing concurrent-create and selection-consistency tests**
 
 ```python
 async def test_concurrent_image_requests_create_one_active_job(client, cut):
@@ -472,13 +489,13 @@ async def test_rejects_video_from_nonselected_image(session, cut, old_video):
         await select_video(session, cut.id, old_video.id)
 ```
 
-- [ ] **Step 3: Run focused tests and observe failures**
+- [x] **Step 3: Run focused tests and observe failures**
 
 Run: `cd backend && python -m pytest tests/test_generations.py -v`
 
 Expected: FAIL because generation operations and routes are absent.
 
-- [ ] **Step 4: Implement minimal request contracts and job creation**
+- [x] **Step 4: Implement minimal request contracts and job creation**
 
 Define one request body:
 
@@ -493,7 +510,7 @@ Inside one short transaction, load the Cut, calculate `coalesce(max(version), 0)
 
 Video creation requires a selected successful image and copies only its ID and the Cut video prompt. Do not store provider, model, completion method, runtime setting, or opaque JSON snapshots.
 
-- [ ] **Step 5: Implement selection rules and Scene detail enrichment**
+- [x] **Step 5: Implement selection rules and Scene detail enrichment**
 
 Selecting an image and clearing selected video occur in one transaction. Selecting a video verifies:
 
@@ -505,7 +522,7 @@ video.job.status == JobStatus.SUCCEEDED
 
 Return Scene detail with ordered Cuts, all jobs/artifacts newest-first, selected IDs, attempts, retry time, stable final error, and source image lineage.
 
-- [ ] **Step 6: Run generation and full backend suites**
+- [x] **Step 6: Run generation and full backend suites**
 
 Run:
 
@@ -518,7 +535,7 @@ ruff check app tests
 
 Expected: concurrent requests return one 202 and one 409; versioning and selection tests pass.
 
-- [ ] **Step 7: Commit generation APIs**
+- [x] **Step 7: Commit generation APIs**
 
 ```bash
 git add backend/app backend/tests/test_generations.py
@@ -544,7 +561,7 @@ git commit -m "feat: add versioned cut generation and selection"
 - Consumes: `GenerationJob`, artifacts, `Settings`, injected provider and clock.
 - Produces: `GenerationRequest`, `Submission`, `TaskResult`, `GenerationProvider`, `GenerationWorker.run_once/start/stop`.
 
-- [ ] **Step 1: Define provider-neutral contracts and write failing Kie submit tests**
+- [x] **Step 1: Define provider-neutral contracts and write failing Kie submit tests**
 
 ```python
 @dataclass(frozen=True)
@@ -598,7 +615,7 @@ async def test_kie_video_submit_contract(kie, respx_mock):
     }
 ```
 
-- [ ] **Step 2: Write failing Kie response and error contract tests**
+- [x] **Step 2: Write failing Kie response and error contract tests**
 
 ```python
 async def test_kie_poll_success_requires_nonempty_http_url(kie, respx_mock):
@@ -622,7 +639,7 @@ async def test_kie_malformed_or_unknown_payload_is_contract_error(kie, respx_moc
         await kie.poll("task-1")
 ```
 
-- [ ] **Step 3: Implement Kie adapter with explicit error classification**
+- [x] **Step 3: Implement Kie adapter with explicit error classification**
 
 Use only:
 
@@ -634,7 +651,7 @@ Authorization: Bearer {KIE_API_KEY}
 
 Validate HTTP status, provider `code`, task ID, known state, JSON-encoded `resultJson`, nonempty `resultUrls`, and HTTP(S) result URL. Map connect-before-send, explicit 429/5xx response, and provider retryable failure to typed retryable errors. Map POST read timeout to `SubmissionUncertainError`. Redact response bodies from public errors.
 
-- [ ] **Step 4: Write failing worker transition and persistence tests**
+- [x] **Step 4: Write failing worker transition and persistence tests**
 
 ```python
 async def test_worker_handles_one_due_job_per_run(worker, queued_jobs):
@@ -667,7 +684,7 @@ async def test_transient_poll_error_does_not_consume_attempt(worker, poll_timeou
     assert processing_job.attempt_count == before
 ```
 
-- [ ] **Step 5: Implement the single-job worker and startup recovery**
+- [x] **Step 5: Implement the single-job worker and startup recovery**
 
 `run_once()` performs exactly one of these operations:
 
@@ -688,7 +705,7 @@ On startup:
 
 Mock failure behavior uses the Job's persisted `attempt_count`, never an in-memory counter.
 
-- [ ] **Step 6: Run worker, provider, and backend suites**
+- [x] **Step 6: Run worker, provider, and backend suites**
 
 Run:
 
@@ -702,7 +719,7 @@ mypy app
 
 Expected: all state transitions and HTTP contracts pass with no real network calls.
 
-- [ ] **Step 7: Commit Polling generation processing**
+- [x] **Step 7: Commit Polling generation processing**
 
 ```bash
 git add backend/app backend/tests
@@ -735,11 +752,11 @@ git commit -m "feat: process generation jobs with one polling worker"
 - Consumes: `/api/config`, Scene endpoints, generation endpoints, selection endpoints.
 - Produces: typed API client, prompt/Scene workspace, Cut cards, query polling, and URL Scene restoration.
 
-- [ ] **Step 1: Create frontend test harness**
+- [x] **Step 1: Create frontend test harness**
 
 Add React, TanStack Query, TypeScript, Vite, ESLint, Vitest, jsdom, Testing Library, MSW, and Playwright. Define scripts `dev`, `build`, `lint`, `test`, `test:run`, and `test:e2e`.
 
-- [ ] **Step 2: Write failing startup mode and Scene restoration tests**
+- [x] **Step 2: Write failing startup mode and Scene restoration tests**
 
 ```tsx
 it("shows startup mode without a switch", async () => {
@@ -764,7 +781,7 @@ it("writes a newly created scene id to the URL", async () => {
 });
 ```
 
-- [ ] **Step 3: Write failing pending-mutation, retry, regenerate, and selection tests**
+- [x] **Step 3: Write failing pending-mutation, retry, regenerate, and selection tests**
 
 ```tsx
 it("disables generation immediately while the mutation is pending", async () => {
@@ -790,25 +807,25 @@ it("clears the displayed video selection after selecting another image", async (
 });
 ```
 
-- [ ] **Step 4: Run frontend tests and observe missing component failures**
+- [x] **Step 4: Run frontend tests and observe missing component failures**
 
 Run: `cd frontend && npm test -- --run`
 
 Expected: FAIL because the app, API client, and components are absent.
 
-- [ ] **Step 5: Implement typed API client and query ownership**
+- [x] **Step 5: Implement typed API client and query ownership**
 
 Use query keys `['config']` and `['scene', sceneId]`. Poll Scene every second only while any job is nonterminal. Generation mutations disable their own button via `mutation.isPending`, then invalidate only the current Scene query. Parse `{code,message}` into `ApiError` and show the safe message.
 
 Keep the active Scene ID in `URLSearchParams`, not component-only state. When Scene ID changes, mount a new `SceneWorkspace key={sceneId}` so local Cut/player state resets.
 
-- [ ] **Step 6: Implement accessible workspace and Cut cards**
+- [x] **Step 6: Implement accessible workspace and Cut cards**
 
 Render six ordered Cut regions. Show newest generation versions first without hiding failures. Show status, `attemptCount/maxAttempts`, next retry time, stable final error, source image, and prompt. Button labels are `Generate image`, `Regenerate image`, `Generate video`, or `Regenerate video` based only on artifact history and active status.
 
 Mock scenario controls appear only when `/api/config` returns `MOCK`. Live has no runtime switch and no key status UI.
 
-- [ ] **Step 7: Run frontend verification**
+- [x] **Step 7: Run frontend verification**
 
 Run:
 
@@ -821,7 +838,7 @@ npm run build
 
 Expected: tests, lint, and production build pass.
 
-- [ ] **Step 8: Commit the frontend workspace**
+- [x] **Step 8: Commit the frontend workspace**
 
 ```bash
 git add frontend
@@ -844,7 +861,7 @@ git commit -m "feat: add refresh-safe generation workspace"
 - Consumes: ordered Cuts with selected successful video and current selected image lineage.
 - Produces: `SequencePlayer` with readiness, play, pause, restart, Cut transition, progress, and media error UI.
 
-- [ ] **Step 1: Write failing readiness and transition tests**
+- [x] **Step 1: Write failing readiness and transition tests**
 
 ```tsx
 it("requires six compatible selected videos", () => {
@@ -873,17 +890,17 @@ it("shows media and autoplay failures", async () => {
 });
 ```
 
-- [ ] **Step 2: Run player tests and observe missing component failure**
+- [x] **Step 2: Run player tests and observe missing component failure**
 
 Run: `cd frontend && npm test -- --run src/features/player/SequencePlayer.test.tsx`
 
 Expected: collection fails because `SequencePlayer` is absent.
 
-- [ ] **Step 3: Implement one-video-at-a-time sequence playback**
+- [x] **Step 3: Implement one-video-at-a-time sequence playback**
 
 Sort Cuts by `order`, derive readiness, and render one `<video>` at a time. Advance only on `ended`. Reset to Cut 1 when selected video IDs change. Catch `video.play()` rejection and handle `error`. Label the UI `Nominal 30-second sequence`; do not claim exact media duration.
 
-- [ ] **Step 4: Run player and full frontend suites**
+- [x] **Step 4: Run player and full frontend suites**
 
 Run:
 
@@ -896,7 +913,7 @@ npm run build
 
 Expected: readiness, transition, reset, and error tests pass.
 
-- [ ] **Step 5: Commit the sequence player**
+- [x] **Step 5: Commit the sequence player**
 
 ```bash
 git add frontend/src
@@ -923,7 +940,7 @@ git commit -m "feat: play selected cut videos sequentially"
 - Consumes: complete backend and frontend.
 - Produces: localhost-only Compose demo, end-to-end requirement evidence, CI, and submission documentation.
 
-- [ ] **Step 1: Add a full secret redaction test before delivery code**
+- [x] **Step 1: Add a full secret redaction test before delivery code**
 
 ```python
 @pytest.mark.parametrize("secret_name", ["openai_api_key", "kie_api_key"])
@@ -942,7 +959,7 @@ Run: `cd backend && python -m pytest tests/test_core.py -k secret -v`
 
 Expected: PASS using the logging filter created in Task 1.
 
-- [ ] **Step 2: Create localhost-only Dockerfiles and Compose**
+- [x] **Step 2: Create localhost-only Dockerfiles and Compose**
 
 Backend command:
 
@@ -964,7 +981,7 @@ services:
 
 Compose contains only frontend and backend, defaults to `GENERATION_MODE=mock`, mounts one named backend data volume, and waits for `/health` before frontend startup.
 
-- [ ] **Step 3: Write the requirement-traceable Playwright scenario**
+- [x] **Step 3: Write the requirement-traceable Playwright scenario**
 
 ```ts
 test("REQ-01..08: creates, retries, regenerates, restores, and plays", async ({ page }) => {
@@ -999,7 +1016,7 @@ test("REQ-01..08: creates, retries, regenerates, restores, and plays", async ({ 
 });
 ```
 
-- [ ] **Step 4: Complete README with scope, traceability, and trade-offs**
+- [x] **Step 4: Complete README with scope, traceability, and trade-offs**
 
 README must contain:
 
@@ -1016,7 +1033,7 @@ README must contain:
 - single-process, expiring provider URL, and no-MP4 limitations
 - backend, frontend, E2E, Compose, and secret-scan commands
 
-- [ ] **Step 5: Add CI without API secrets**
+- [x] **Step 5: Add CI without API secrets**
 
 CI executes:
 
@@ -1027,7 +1044,7 @@ frontend: npm ci; npm run lint; npm run test:run; npm run build
 
 Do not define `OPENAI_API_KEY` or `KIE_API_KEY`. Run all tests in Mock mode and fail on any unregistered outbound request.
 
-- [ ] **Step 6: Run complete automated verification**
+- [x] **Step 6: Run complete automated verification**
 
 Run:
 
@@ -1042,7 +1059,7 @@ cd .. && docker compose logs backend --no-color
 
 Expected: all checks pass, both services are healthy, E2E passes in Mock mode, and logs contain no authorization headers or configured secrets.
 
-- [ ] **Step 7: Run repository secret and removed-scope scans**
+- [x] **Step 7: Run repository secret and removed-scope scans**
 
 Run:
 
@@ -1053,7 +1070,7 @@ rg -n "runtime-mode|RuntimeSetting|completion_method|WEBHOOK_SIGNING_SECRET|/api
 
 Expected: both commands return no matches.
 
-- [ ] **Step 8: Perform the manual local acceptance walkthrough**
+- [x] **Step 8: Perform the manual local acceptance walkthrough**
 
 1. Open `http://localhost:5173` and confirm read-only `Mock mode`.
 2. Create one Scene and verify exactly six five-second Cuts.
@@ -1065,7 +1082,7 @@ Expected: both commands return no matches.
 8. Reload and confirm the same Scene restores from the URL.
 9. Inspect browser network and built assets; confirm no API Key or mode mutation endpoint exists.
 
-- [ ] **Step 9: Stop containers and commit delivery artifacts**
+- [x] **Step 9: Stop containers and commit delivery artifacts**
 
 Run:
 

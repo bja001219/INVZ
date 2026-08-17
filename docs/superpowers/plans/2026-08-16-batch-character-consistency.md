@@ -10,6 +10,47 @@
 
 **Spec:** `docs/superpowers/specs/2026-08-16-batch-character-consistency-design.md`
 
+## Status — completed 2026-08-16, review fixes landed 2026-08-17
+
+Tasks 1-8 are implemented and committed, `4ee89e3` through `295997a`. A senior review after the
+last task produced further findings; the ones fixed since are in `f49276c` and `c97b7e7`.
+
+**Fixed in `295997a`** — Live provider built twice and leaking its HTTP client; a webhook losing
+the write race with a poll returned 500 and made the provider retry forever; the Mock callback
+task was never discarded.
+
+**Fixed in `f49276c`** — the anchor gate opened when Cut 1 had simply never been requested, so a
+single cut generated outside a batch produced an unreferenced image and broke character
+consistency silently; the capped candidate fetch could fill with anchor-gated jobs and hide
+runnable jobs behind them; the Mock webhook was scheduled inside `submit()` and could overtake
+the worker's own `PROCESSING` commit.
+
+**Fixed in `c97b7e7`** — `docker-compose.yml` carried a literal `WEBHOOK_SECRET`.
+
+**Still open, deliberately.** These are recorded rather than fixed because each is a scope
+decision, not a defect to patch quietly:
+
+- The anchor reference's *effect* is unverified. The `image_urls` request shape is fixed by a
+  contract test, but whether the model honours it is a documented assumption.
+- Live mode has no cost guard: two clicks are twelve real provider calls, with no confirmation
+  and no usage counter.
+- Concurrent `run_once()` double-claiming is prevented structurally by serial claiming, but no
+  test would fail if someone later parallelised the claim.
+- `GenerationBatch.requested_count` is always the scene's cut count, so the name promises more
+  than it delivers.
+- Runtime mode lives in process memory and silently reverts on restart; the UI does not say so.
+- `_recover_one_submitting` recovers one row per tick, so a crash leaving three takes three ticks.
+- The Mock scenario select exists both per-cut and per-batch and the two can disagree.
+
+**Verification at completion:** 192 backend tests (92% coverage), 55 frontend tests, 3 Playwright
+E2E, ruff and mypy --strict clean, `alembic upgrade/downgrade/upgrade` clean. The E2E run used
+`MOCK_WEBHOOK_DELAY_SEC=0` so the callback-ordering fix is exercised rather than masked by latency.
+
+One Global Constraint below is **superseded**: "The anchor gate never deadlocks: cuts 2-6 wait
+only while an anchor job is active." Waiting only for *active* anchor jobs is precisely the hole
+that `f49276c` closed. The current rule is that cuts 2-6 wait whenever an anchor could still
+arrive, and the only release is Cut 1 exhausting its retries.
+
 ## Global Constraints
 
 - Scene output stays exactly six Cuts with `durationSec=5`.
@@ -85,7 +126,7 @@ frontend/src/
   `compose_video_prompt(profiles, shot_description, video_motion) -> str`,
   `SCENE_SYSTEM_INSTRUCTION`.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 ```python
 def test_character_sheet_is_stable_and_ordered(profiles):
@@ -114,12 +155,12 @@ def test_every_cut_shares_one_character_sheet(profiles):
     assert len(sheets) == 1
 ```
 
-- [ ] **Step 2: Run the tests and observe failure**
+- [x] **Step 2: Run the tests and observe failure**
 
 Run: `cd backend && python -m pytest tests/test_prompting.py -v`
 Expected: collection error, `app.prompting` does not exist.
 
-- [ ] **Step 3: Implement the module**
+- [x] **Step 3: Implement the module**
 
 ```python
 VISUAL_STYLE_GUIDE = (
@@ -161,11 +202,11 @@ def compose_video_prompt(profiles, shot_description, video_motion):
 character field concretely, and write `shotDescription`/`videoMotion` that never restate hair or
 outfit because the character sheet is injected separately.
 
-- [ ] **Step 4: Run the tests and verify they pass**
+- [x] **Step 4: Run the tests and verify they pass**
 
 Run: `cd backend && python -m pytest tests/test_prompting.py -v && ruff check app tests && mypy app`
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add backend/app/prompting.py backend/app/schemas.py backend/tests/test_prompting.py
@@ -186,7 +227,7 @@ git commit -m "feat: compose cut prompts from a shared character sheet and style
 - Produces: `Scene.character_profiles` (JSON), `Cut.shot_description`, `Cut.video_motion`,
   `SceneDraft.character_profiles`, `CutDraft(order, shot_description, video_motion, duration_sec)`.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 ```python
 def test_scene_draft_requires_at_least_two_characters(valid_scene_payload):
@@ -204,22 +245,22 @@ async def test_scene_api_stores_character_profiles_and_composed_prompts(client):
         assert cut["shotDescription"]
 ```
 
-- [ ] **Step 2: Run and observe failure**
+- [x] **Step 2: Run and observe failure**
 
 Run: `cd backend && python -m pytest tests/test_scenes.py -v`
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 `Scene.character_profiles` is `JSON` holding the serialized profile list. `create_scene` composes
 `image_prompt` and `video_prompt` once with Task 1 functions and stores them alongside
 `shot_description` and `video_motion`. `MockSceneProvider` returns two fixed characters so Mock output
 is deterministic. `OpenAISceneProvider` passes `SCENE_SYSTEM_INSTRUCTION` as the system message.
 
-- [ ] **Step 4: Run the affected suites**
+- [x] **Step 4: Run the affected suites**
 
 Run: `cd backend && python -m pytest tests/test_scenes.py tests/providers/test_openai_scene.py tests/test_prompting.py -v`
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add backend/app backend/tests
@@ -242,7 +283,7 @@ git commit -m "feat: generate a scene character sheet and inject it into every c
   `GenerationBatch(id, scene_id, kind, requested_count, created_at)`,
   `create_image_job(..., generation_mode, batch_id=None)`.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 ```python
 async def test_job_records_mode_snapshot(session):
@@ -256,21 +297,21 @@ async def test_scene_detail_exposes_mode_and_reference(client, cut):
     assert "referenceImageId" in job
 ```
 
-- [ ] **Step 2: Run and observe failure**
+- [x] **Step 2: Run and observe failure**
 
 Run: `cd backend && python -m pytest tests/test_generations.py -v`
 
-- [ ] **Step 3: Implement model, schema, and migration**
+- [x] **Step 3: Implement model, schema, and migration**
 
 Migration `0002` adds the three job columns, `scenes.character_profiles`, `cuts.shot_description`,
 `cuts.video_motion`, and creates `generation_batches`. Existing rows get `generation_mode='MOCK'`
 via `server_default` then the default is dropped.
 
-- [ ] **Step 4: Run migration and suites**
+- [x] **Step 4: Run migration and suites**
 
 Run: `cd backend && alembic upgrade head && python -m pytest tests -v`
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add backend/app backend/alembic backend/tests
@@ -293,7 +334,7 @@ git commit -m "feat: record generation mode, reference image, and batch on each 
   `create_video_batch(...)`, `POST /api/scenes/{id}/images`, `POST /api/scenes/{id}/videos`,
   `GenerationRequest.reference_image_url`, `GenerationWorker(concurrency=...)`.
 
-- [ ] **Step 1: Write the failing batch tests**
+- [x] **Step 1: Write the failing batch tests**
 
 ```python
 async def test_image_batch_creates_one_job_per_cut(client, scene):
@@ -308,7 +349,7 @@ async def test_batch_skips_cuts_with_an_active_job(client, scene):
     assert body["skipped"] == [{"cutId": str(scene.cuts[0].id), "reason": "GENERATION_ALREADY_ACTIVE"}]
 ```
 
-- [ ] **Step 2: Write the failing concurrency and anchor tests**
+- [x] **Step 2: Write the failing concurrency and anchor tests**
 
 ```python
 async def test_worker_handles_up_to_concurrency_jobs_per_run(worker_factory, six_queued_jobs):
@@ -339,11 +380,11 @@ async def test_kie_image_submit_includes_reference_image_urls(kie, respx_mock):
     assert body["input"]["image_urls"] == ["https://cdn.example/a.png"]
 ```
 
-- [ ] **Step 3: Run and observe failures**
+- [x] **Step 3: Run and observe failures**
 
 Run: `cd backend && python -m pytest tests/test_batches.py tests/test_worker.py tests/providers/test_kie.py -v`
 
-- [ ] **Step 4: Implement claim-serial / call-concurrent worker**
+- [x] **Step 4: Implement claim-serial / call-concurrent worker**
 
 `run_once()` becomes:
 
@@ -371,11 +412,11 @@ job is active, and proceeds with `reference_image_url=None` once no anchor job r
 `_submission_body` in `kie.py` adds `"image_urls": [reference_image_url]` for IMAGE requests that
 carry a reference.
 
-- [ ] **Step 5: Run the suites**
+- [x] **Step 5: Run the suites**
 
 Run: `cd backend && python -m pytest tests -v && ruff check app tests && mypy app`
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add backend/app backend/tests
@@ -396,7 +437,7 @@ git commit -m "feat: generate cut images and videos in bounded-concurrency batch
 - Produces: `RuntimeMode(initial, live_available)`, `ProviderRegistry.scene_provider(mode)`,
   `.generation_provider(mode)`, `GET/PUT /api/config`.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 ```python
 async def test_config_reports_live_availability(client):
@@ -413,21 +454,21 @@ async def test_switch_takes_effect_for_new_jobs_only(live_capable_client, cut):
     assert first.json()["generationMode"] == "MOCK"
 ```
 
-- [ ] **Step 2: Run and observe failure**
+- [x] **Step 2: Run and observe failure**
 
 Run: `cd backend && python -m pytest tests/test_core.py -k config -v`
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 `RuntimeMode` holds the current mode in memory. `ProviderRegistry` builds the Mock providers always
 and the Live providers only when both keys are present. The worker looks up the provider with
 `registry.generation_provider(job.generation_mode)` so a mode flip never redirects an in-flight task.
 
-- [ ] **Step 4: Run the suites**
+- [x] **Step 4: Run the suites**
 
 Run: `cd backend && python -m pytest tests -v`
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add backend/app backend/tests
@@ -449,7 +490,7 @@ git commit -m "feat: switch generation mode at runtime without moving in-flight 
 - Produces: `task_result_from_data(data) -> TaskResult`, `GenerationWorker.apply_external_result`,
   `POST /api/webhooks/kie`, `MockScenario.SUCCEED_VIA_WEBHOOK`.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 ```python
 async def test_webhook_requires_the_configured_secret(webhook_client):
@@ -483,11 +524,11 @@ async def test_kie_submit_sends_callback_url_when_configured(kie_with_callback, 
     assert json.loads(route.calls.last.request.content)["callBackUrl"] == "https://example.test/api/webhooks/kie"
 ```
 
-- [ ] **Step 2: Run and observe failure**
+- [x] **Step 2: Run and observe failure**
 
 Run: `cd backend && python -m pytest tests/test_webhooks.py -v`
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 Extract `task_result_from_data` from `KieGenerationProvider.poll` and reuse it in both paths.
 Promote `_apply_poll_result` to `apply_external_result`. The route verifies the secret with
@@ -498,11 +539,11 @@ Promote `_apply_poll_result` to `apply_external_result`. The route verifies the 
 `MockGenerationProvider` takes an optional `webhook_sender`; under `SUCCEED_VIA_WEBHOOK` it schedules
 a delayed self-call and its `poll()` keeps returning `PENDING`.
 
-- [ ] **Step 4: Run the suites**
+- [x] **Step 4: Run the suites**
 
 Run: `cd backend && python -m pytest tests -v && ruff check app tests && mypy app`
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add backend/app backend/tests
@@ -527,7 +568,7 @@ git commit -m "feat: accept provider webhooks through the polling state machine"
 - Consumes: scene detail with `characterProfiles`, jobs with `generationMode`/`referenceImageId`.
 - Produces: `CharacterPanel`, `BatchControls`, `ModeSwitch`.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 ```tsx
 it("shows every scene character with its defining traits", () => {
@@ -562,21 +603,21 @@ it("offers Live only when the backend reports it is available", async () => {
 });
 ```
 
-- [ ] **Step 2: Run and observe failure**
+- [x] **Step 2: Run and observe failure**
 
 Run: `cd frontend && npm run test:run`
 
-- [ ] **Step 3: Implement the components**
+- [x] **Step 3: Implement the components**
 
 `CharacterPanel` renders one card per profile. `BatchControls` derives counts from the cuts' jobs and
 posts to the scene batch endpoints. `ModeSwitch` calls `PUT /api/config` and invalidates `['config']`.
 `CutCard` gains a mode badge, the shot description, and a reference-image line.
 
-- [ ] **Step 4: Run frontend verification**
+- [x] **Step 4: Run frontend verification**
 
 Run: `cd frontend && npm run test:run && npm run lint && npm run build`
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add frontend/src
@@ -592,24 +633,24 @@ git commit -m "feat: surface characters, batch progress, mode switching, and job
   `frontend/e2e/prompt-to-animation.spec.ts`
 - Test: whole suite
 
-- [ ] **Step 1: Extend the E2E scenario**
+- [x] **Step 1: Extend the E2E scenario**
 
 Add to the existing Mock scenario, after the six cuts appear: click `Generate all images`, wait for
 six `Succeeded` image jobs, assert every cut's image job prompt region shows the same lead character
 name, click `Generate all videos`, and assert the player reaches `6 of 6 videos ready`.
 
-- [ ] **Step 2: Document the new environment variables**
+- [x] **Step 2: Document the new environment variables**
 
 `GENERATION_CONCURRENCY=3`, `WEBHOOK_SECRET=`, `WEBHOOK_PUBLIC_URL=`, `SELF_BASE_URL=http://127.0.0.1:8000`,
 `MOCK_WEBHOOK_DELAY_SEC=2` go into `.env.example`, the README variable table, and `docker-compose.yml`.
 
-- [ ] **Step 3: Document batch, character consistency, runtime switching, and webhook**
+- [x] **Step 3: Document batch, character consistency, runtime switching, and webhook**
 
 README gains: how batching works and why claiming is serial, how the character sheet and anchor image
 produce consistency, how to switch modes at runtime, how to test the webhook in Mock, and the updated
 requirement traceability table including `REQ-12` through `REQ-17`.
 
-- [ ] **Step 4: Run complete verification**
+- [x] **Step 4: Run complete verification**
 
 ```bash
 cd backend && ruff check app tests && mypy app && python -m pytest tests -v --cov=app
@@ -618,7 +659,7 @@ cd ../frontend && npm run lint && npm run test:run && npm run build
 npm run test:e2e
 ```
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add README.md .env.example docker-compose.yml frontend/e2e
